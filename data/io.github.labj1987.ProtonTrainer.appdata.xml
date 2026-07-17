@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.labj1987.ProtonTrainer</id>
+  <name>Proton Trainer</name>
+  <summary>Launch Windows game trainers through Proton against a running Steam game</summary>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+  <description>
+    <p>
+      Runs a Windows trainer .exe (e.g. a FLiNG trainer) directly against a
+      currently running Steam game's existing Proton wine session, so the
+      trainer's wine client joins the game's wineserver instead of starting
+      its own. The Proton build to use is detected from the actual running
+      wineserver process, not from potentially stale compatdata metadata.
+    </p>
+  </description>
+  <launchable type="desktop-id">proton-trainer.desktop</launchable>
+  <provides>
+    <binary>proton-trainer</binary>
+  </provides>
+  <categories>
+    <category>Game</category>
+    <category>Utility</category>
+  </categories>
+  <releases>
+    <release version="0.1.0" date="2026-07-17"/>
+  </releases>
+</component>

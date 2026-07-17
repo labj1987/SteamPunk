@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Proton Trainer
+Comment=Launch Windows game trainers through Proton against a running Steam game
+Exec=proton-trainer
+Icon=proton-trainer
+Terminal=false
+Type=Application
+Categories=Game;Utility;
+Keywords=proton;steam;trainer;wine;cheat;
+StartupWMClass=proton-trainer

@@ -1,0 +1,4 @@
+/target
+/build-appimage
+*.AppImage
+*.AppImage.zsync
