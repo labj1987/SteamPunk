@@ -193,7 +193,7 @@ pub fn launch_trainer(target: &LaunchTarget, trainer_path: &Path, log_path: &Pat
 
     let proton = target.proton_dir.join("proton");
     Command::new(&proton)
-        .arg("run")
+        .arg("runinprefix")
         .arg(trainer_path)
         .env("STEAM_COMPAT_CLIENT_INSTALL_PATH", &target.client_dir)
         .env("STEAM_COMPAT_DATA_PATH", &target.compatdata_dir)

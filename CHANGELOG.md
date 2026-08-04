@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.8 — 2026-08-04
+
+- Fixed trainers failing to launch against a running game.
+
 ## 0.1.7 — 2026-08-04
 
 - The app now sets up the required Windows compatibility component
