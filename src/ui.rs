@@ -8,7 +8,7 @@ use gtk4::{
 };
 use libadwaita::prelude::*;
 use libadwaita::{
-    ActionRow, Application, ApplicationWindow, HeaderBar, MessageDialog, StatusPage, Toast,
+    ActionRow, AlertDialog, Application, ApplicationWindow, HeaderBar, StatusPage, Toast,
     ToastOverlay, Window as AdwWindow,
 };
 
@@ -398,15 +398,13 @@ dialog at the next game launch — just close it.",
         wineprefix.display()
     );
 
-    let dialog = MessageDialog::builder()
-        .transient_for(window)
-        .modal(true)
+    let dialog = AlertDialog::builder()
         .heading("One-Time .NET 4.0 Setup Needed")
         .body(&body)
         .build();
     dialog.add_responses(&[("ok", "Got It")]);
     dialog.set_default_response(Some("ok"));
-    dialog.present();
+    dialog.present(Some(window));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
