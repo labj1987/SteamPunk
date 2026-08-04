@@ -66,7 +66,7 @@ fi
 echo "==> Packing AppImage"
 OUT="$APP-$VERSION-$ARCH.AppImage"
 
-UPDATE_INFORMATION="gh-releases-zsync|labj1987|proton-trainer|latest|proton-trainer-*-x86_64.AppImage" \
+UPDATE_INFORMATION="gh-releases-zsync|labj1987|proton-trainer|latest|proton-trainer-*-x86_64.AppImage.zsync" \
 VERSION="$VERSION" ARCH="$ARCH" "$TOOL" --appimage-extract-and-run "$APPDIR" "$OUT"
 
 echo "==> Done: $OUT"

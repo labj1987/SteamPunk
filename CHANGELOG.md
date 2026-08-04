@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.2 — 2026-08-04
+
+- Fixed `UPDATE_INFORMATION` in `build-appimage.sh` to reference the
+  `.zsync` sidecar filename instead of the AppImage filename, per the
+  AppImage update spec. This was breaking update detection in tools like
+  Gear Lever even though the `.zsync` sidecar was already being generated
+  and published correctly. Packaging-only fix, no application behavior
+  changes.
+
 ## 0.1.1 — 2026-08-04
 
 - Fixed a phantom, unnamed taskbar/dock window appearing whenever the
