@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.4 — 2026-08-04
+
+- The About dialog used `gtk4::AboutDialog`, and the Troubleshoot dialog
+  used `libadwaita::Window` — both are real `Gtk.Window` subclasses and
+  create separate top-level Wayland surfaces, each showing as a second,
+  unnamed window in the dock (the same bug class as the `MessageDialog`
+  fix in 0.1.1). Switched to `libadwaita::AboutDialog` and
+  `libadwaita::Dialog` respectively, both `Adw.Dialog` subclasses that
+  render as sheets inside the main window's own surface.
+
 ## 0.1.3 — 2026-08-04
 
 - 0.1.2 corrected the `UPDATE_INFORMATION` string but the fix never took

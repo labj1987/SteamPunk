@@ -8,8 +8,8 @@ use gtk4::{
 };
 use libadwaita::prelude::*;
 use libadwaita::{
-    ActionRow, AlertDialog, Application, ApplicationWindow, HeaderBar, StatusPage, Toast,
-    ToastOverlay, Window as AdwWindow,
+    AboutDialog, ActionRow, AlertDialog, Application, ApplicationWindow, Dialog as AdwDialog,
+    HeaderBar, StatusPage, Toast, ToastOverlay,
 };
 
 use std::cell::RefCell;
@@ -286,17 +286,16 @@ pub fn build_ui(app: &Application) {
     {
         let window = window.clone();
         about_btn.connect_clicked(move |_| {
-            let dialog = gtk4::AboutDialog::builder()
-                .program_name("Proton Trainer")
+            let dialog = AboutDialog::builder()
+                .application_name("Proton Trainer")
                 .version(env!("CARGO_PKG_VERSION"))
-                .authors(vec!["Linnard Alex Brown Jr.".to_string()])
+                .developers(vec!["Linnard Alex Brown Jr."])
                 .comments(
                     "Launches Windows game trainers through Proton against a running \
                      Steam game's wine session.",
                 )
                 .build();
-            dialog.set_transient_for(Some(&window));
-            dialog.present();
+            dialog.present(Some(&window));
         });
     }
 
@@ -436,12 +435,10 @@ fn show_troubleshoot(window: &ApplicationWindow, toast_overlay: &ToastOverlay) {
                 return;
             }
 
-            let dialog = AdwWindow::builder()
-                .transient_for(&window)
-                .modal(true)
+            let dialog = AdwDialog::builder()
                 .title("Clear Stale Trainer Instance")
-                .default_width(420)
-                .default_height(320)
+                .content_width(420)
+                .content_height(320)
                 .build();
 
             let outer = GtkBox::new(Orientation::Vertical, 8);
@@ -491,8 +488,8 @@ fn show_troubleshoot(window: &ApplicationWindow, toast_overlay: &ToastOverlay) {
             }
 
             let scroll = ScrolledWindow::builder().vexpand(true).child(&outer).build();
-            dialog.set_content(Some(&scroll));
-            dialog.present();
+            dialog.set_child(Some(&scroll));
+            dialog.present(Some(&window));
         },
     );
 }
