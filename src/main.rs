@@ -1,5 +1,6 @@
 mod launcher;
 mod library;
+mod setup;
 mod steam;
 mod ui;
 

@@ -32,13 +32,18 @@ cargo build --release
 # ── AppDir layout ─────────────────────────────────────────────────────
 rm -rf "$BUILD_DIR"
 mkdir -p "$APPDIR/usr/bin" \
+         "$APPDIR/usr/lib/$APP" \
          "$APPDIR/usr/share/applications" \
          "$APPDIR/usr/share/icons/hicolor/256x256/apps" \
+         "$APPDIR/usr/share/polkit-1/actions" \
          "$APPDIR/usr/share/metainfo"
 
 cp "target/release/$APP"                              "$APPDIR/usr/bin/"
+cp scripts/privileged-setup.sh                        "$APPDIR/usr/lib/$APP/"
+chmod 755 "$APPDIR/usr/lib/$APP/privileged-setup.sh"
 cp data/$APP.desktop                                  "$APPDIR/usr/share/applications/"
 cp data/$APP.png                                       "$APPDIR/usr/share/icons/hicolor/256x256/apps/"
+cp data/io.github.labj1987.ProtonTrainer.setup.policy  "$APPDIR/usr/share/polkit-1/actions/"
 cp data/io.github.labj1987.ProtonTrainer.appdata.xml   "$APPDIR/usr/share/metainfo/"
 
 # Top-level AppImage requirements
@@ -46,9 +51,36 @@ cp data/$APP.desktop "$APPDIR/"
 cp data/$APP.png     "$APPDIR/"
 
 # ── AppRun ────────────────────────────────────────────────────────────
+# On first launch (or after an update) the privileged script and polkit
+# policy must exist at fixed system paths — polkit refuses relative/user
+# paths — so AppRun installs them via pkexec when missing or outdated, then
+# execs the app. Same pattern as MKI's AppRun.
 cat > "$APPDIR/AppRun" << 'APPRUN'
 #!/usr/bin/env bash
 HERE="$(dirname "$(readlink -f "$0")")"
+APP="proton-trainer"
+
+SRC_SCRIPT="$HERE/usr/lib/$APP/privileged-setup.sh"
+SRC_POLICY="$HERE/usr/share/polkit-1/actions/io.github.labj1987.ProtonTrainer.setup.policy"
+DST_SCRIPT="/usr/lib/$APP/privileged-setup.sh"
+DST_POLICY="/usr/share/polkit-1/actions/io.github.labj1987.ProtonTrainer.setup.policy"
+
+needs_install=0
+if [[ ! -f "$DST_SCRIPT" ]] || ! cmp -s "$SRC_SCRIPT" "$DST_SCRIPT"; then
+    needs_install=1
+fi
+if [[ ! -f "$DST_POLICY" ]] || ! cmp -s "$SRC_POLICY" "$DST_POLICY"; then
+    needs_install=1
+fi
+
+if [[ $needs_install -eq 1 ]]; then
+    STAGE="$(mktemp -d)"
+    cp "$SRC_SCRIPT" "$STAGE/privileged-setup.sh"
+    cp "$SRC_POLICY" "$STAGE/policy"
+    pkexec bash -c "install -D -m 755 '$STAGE/privileged-setup.sh' '$DST_SCRIPT' && install -D -m 644 '$STAGE/policy' '$DST_POLICY'"
+    rm -rf "$STAGE"
+fi
+
 export PATH="$HERE/usr/bin:$PATH"
 exec "$HERE/usr/bin/proton-trainer" "$@"
 APPRUN

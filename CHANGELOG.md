@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.1.7 — 2026-08-04
+
+- The app now sets up the required Windows compatibility component
+  automatically — no more copying commands into a terminal. Clicking
+  Launch on a game that needs it shows a "Set Up Automatically" dialog
+  instead of raw shell commands; confirming installs the one-time system
+  packages (a single password prompt, via `pkexec` — same pattern already
+  used for other privileged operations in this app family) and then runs
+  `winetricks dotnet48 win10` against the game's prefix, launching the
+  trainer automatically once done. A collapsed "Show manual commands
+  instead" disclosure keeps the exact commands available for advanced
+  users or troubleshooting.
+- Switched the installed runtime from `dotnet40` to `dotnet48`:
+  `dotnet40` reliably fails to install a working `clr.dll` on this
+  Ubuntu/wine combination (winetricks reports success, but the actual
+  runtime binary silently doesn't land), while `dotnet48` is
+  backward-compatible for FLiNG trainers and installs correctly. The
+  `clr.dll` presence check (`has_dotnet40`) is unaffected — both versions
+  populate the same path.
+
 ## 0.1.6 — 2026-08-04
 
 - Root cause of the persistent phantom taskbar entry confirmed with

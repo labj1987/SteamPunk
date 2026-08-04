@@ -1,5 +1,6 @@
 use crate::launcher::{self, LaunchTarget};
 use crate::library::{self, Trainer};
+use crate::setup;
 
 use gtk4::prelude::*;
 use gtk4::{
@@ -9,7 +10,7 @@ use gtk4::{
 use libadwaita::prelude::*;
 use libadwaita::{
     AboutDialog, ActionRow, AlertDialog, Application, ApplicationWindow, Dialog as AdwDialog,
-    HeaderBar, StatusPage, Toast, ToastOverlay,
+    ExpanderRow, HeaderBar, ResponseAppearance, StatusPage, Toast, ToastOverlay,
 };
 
 use std::cell::RefCell;
@@ -333,77 +334,150 @@ fn wire_launch_button(
                 };
 
                 if !launcher::has_dotnet40(&target) {
-                    show_dotnet_dialog(&window, &target);
+                    show_dotnet_dialog(&window, target, trainer, toast_overlay);
                     return;
                 }
 
-                let trainer_name = trainer.name.clone();
-                let trainer_path = trainer.path.clone();
-                let toast_overlay2 = toast_overlay.clone();
-                let log = log_path();
-                let appid = target.appid;
-
-                spawn_async(
-                    async move {
-                        tokio::task::spawn_blocking(move || {
-                            launcher::launch_trainer(&target, &trainer_path, &log)
-                        })
-                        .await
-                    },
-                    move |launch_result| match launch_result {
-                        Ok(Ok(())) => toast_overlay2.add_toast(Toast::new(&format!(
-                            "Launched {trainer_name} (AppId {appid})"
-                        ))),
-                        Ok(Err(e)) => {
-                            toast_overlay2.add_toast(Toast::new(&format!("Launch failed: {e}")))
-                        }
-                        Err(e) => {
-                            toast_overlay2.add_toast(Toast::new(&format!("Task error: {e}")))
-                        }
-                    },
-                );
+                launch_trainer_now(target, trainer, toast_overlay);
             },
         );
     });
 }
 
+/// Launch a trainer against an already-resolved target, off the main
+/// thread. Shared by the normal launch path and by the post-setup
+/// auto-launch once the one-time .NET install succeeds.
+fn launch_trainer_now(target: LaunchTarget, trainer: Trainer, toast_overlay: ToastOverlay) {
+    let trainer_name = trainer.name.clone();
+    let trainer_path = trainer.path.clone();
+    let toast_overlay2 = toast_overlay.clone();
+    let log = log_path();
+    let appid = target.appid;
+
+    spawn_async(
+        async move {
+            tokio::task::spawn_blocking(move || {
+                launcher::launch_trainer(&target, &trainer_path, &log)
+            })
+            .await
+        },
+        move |launch_result| match launch_result {
+            Ok(Ok(())) => toast_overlay2.add_toast(Toast::new(&format!(
+                "Launched {trainer_name} (AppId {appid})"
+            ))),
+            Ok(Err(e)) => toast_overlay2.add_toast(Toast::new(&format!("Launch failed: {e}"))),
+            Err(e) => toast_overlay2.add_toast(Toast::new(&format!("Task error: {e}"))),
+        },
+    );
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
-//  .NET 4.0 one-time setup dialog
+//  .NET one-time setup dialog
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn show_dotnet_dialog(window: &ApplicationWindow, target: &LaunchTarget) {
-    let wineprefix = target.prefix_dir();
-    let body = format!(
-        "FLiNG trainers are WPF apps and crash under Proton's bundled wine-mono. \
-This game's prefix needs real .NET Framework 4.0, installed once.\n\
-\n\
-One-time system packages (as root):\n\
-  dpkg --add-architecture i386 && apt update && apt install -y winetricks cabextract wine32:i386\n\
-\n\
-With the game CLOSED (no wineserver running), as your normal user:\n\
-  WINEPREFIX={} winetricks -q dotnet40 win10\n\
-\n\
-Two constraints that matter:\n\
-1. The install must use system wine with wine32:i386 present (classic mode). Installing with \
-Proton's own wine, or wine's wow64 mode without wine32, fails with a known \"FDICopy failed\" \
-bug on netfx_core.mzz.\n\
-2. The prefix must be one Proton itself created. If this prefix is broken or fresh: delete its \
-compatdata, launch the game once via Steam so Proton builds a native prefix, quit, then run the \
-winetricks command above. Installing into a winetricks-created prefix and letting Proton adopt \
-it breaks SteamAPI init.\n\
-\n\
-After this, Proton's xalia.exe accessibility helper may show a harmless wine \"Program Error\" \
-dialog at the next game launch — just close it.",
-        wineprefix.display()
-    );
+/// Exact manual commands, shown only inside the collapsed disclosure — the
+/// default path is the "Set Up Automatically" button, which runs the same
+/// commands itself via setup::run_system_setup / setup::install_dotnet48.
+fn manual_commands(target: &LaunchTarget) -> String {
+    format!(
+        "dpkg --add-architecture i386 && apt update && apt install -y winetricks cabextract wine32:i386\n\
+WINEPREFIX={} winetricks -q dotnet48 win10",
+        target.prefix_dir().display()
+    )
+}
+
+fn show_dotnet_dialog(
+    window: &ApplicationWindow,
+    target: LaunchTarget,
+    trainer: Trainer,
+    toast_overlay: ToastOverlay,
+) {
+    let body = "This game needs a one-time Windows compatibility component before trainers \
+will run. This will ask for your password once, then take a minute or two.";
+
+    let commands_label = Label::new(Some(&manual_commands(&target)));
+    commands_label.set_wrap(true);
+    commands_label.set_xalign(0.0);
+    commands_label.set_selectable(true);
+    commands_label.set_margin_top(6);
+    commands_label.set_margin_bottom(6);
+    commands_label.set_margin_start(12);
+    commands_label.set_margin_end(12);
+
+    let expander = ExpanderRow::builder()
+        .title("Show manual commands instead")
+        .expanded(false)
+        .build();
+    expander.add_row(&commands_label);
+
+    let disclosure_list = ListBox::new();
+    disclosure_list.set_selection_mode(SelectionMode::None);
+    disclosure_list.add_css_class("boxed-list");
+    disclosure_list.append(&expander);
 
     let dialog = AlertDialog::builder()
-        .heading("One-Time .NET 4.0 Setup Needed")
-        .body(&body)
+        .heading("One-Time Setup Needed")
+        .body(body)
+        .extra_child(&disclosure_list)
         .build();
-    dialog.add_responses(&[("ok", "Got It")]);
-    dialog.set_default_response(Some("ok"));
+    dialog.add_responses(&[("cancel", "Cancel"), ("setup", "Set Up Automatically")]);
+    dialog.set_response_appearance("setup", ResponseAppearance::Suggested);
+    dialog.set_default_response(Some("setup"));
+    dialog.set_close_response("cancel");
+
+    // AlertDialog::connect_response requires Fn, not FnOnce, so the
+    // non-Clone target/trainer are handed off through a RefCell rather than
+    // moved directly — the dialog only ever fires one response in practice.
+    let state: Rc<RefCell<Option<(LaunchTarget, Trainer)>>> =
+        Rc::new(RefCell::new(Some((target, trainer))));
+
+    dialog.connect_response(None, move |_dialog, response| {
+        if response != "setup" {
+            return;
+        }
+        let Some((target, trainer)) = state.borrow_mut().take() else {
+            return;
+        };
+        run_automatic_setup(target, trainer, toast_overlay.clone());
+    });
+
     dialog.present(Some(window));
+}
+
+/// Runs the two-phase setup (privileged system packages, then user-level
+/// winetricks install) off the main thread, then auto-launches the trainer
+/// on success. Errors from either phase surface via a toast with the real
+/// error message; the setup script and install_dotnet48 both also log to
+/// /var/log/proton-trainer.log.
+fn run_automatic_setup(target: LaunchTarget, trainer: Trainer, toast_overlay: ToastOverlay) {
+    toast_overlay.add_toast(Toast::new("Setting up .NET — this may take a minute or two…"));
+
+    spawn_async(
+        async move {
+            tokio::task::spawn_blocking(move || -> anyhow::Result<LaunchTarget> {
+                if !setup::system_prereqs_present() {
+                    setup::run_system_setup()?;
+                }
+                setup::install_dotnet48(&target.prefix_dir())?;
+                Ok(target)
+            })
+            .await
+        },
+        move |result| {
+            let target = match result {
+                Ok(Ok(t)) => t,
+                Ok(Err(e)) => {
+                    toast_overlay.add_toast(Toast::new(&format!("Setup failed: {e}")));
+                    return;
+                }
+                Err(e) => {
+                    toast_overlay.add_toast(Toast::new(&format!("Task error: {e}")));
+                    return;
+                }
+            };
+            launch_trainer_now(target, trainer, toast_overlay);
+        },
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

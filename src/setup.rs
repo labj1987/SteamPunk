@@ -1,0 +1,100 @@
+//! setup.rs — one-time wine .NET prerequisite setup.
+//!
+//! Split into two phases matching the actual privilege boundary: system
+//! packages need root (via pkexec + a privileged script, same pattern as
+//! MKI's install.rs), while the winetricks install itself only touches the
+//! user-owned wine prefix and needs no privilege escalation.
+
+use anyhow::{bail, Context, Result};
+use std::io::Write;
+use std::path::Path;
+use std::process::Command;
+
+const SCRIPT: &str = "/usr/lib/proton-trainer/privileged-setup.sh";
+const LOGFILE: &str = "/var/log/proton-trainer.log";
+
+/// Returns true if the one-time system packages are already present — skip
+/// pkexec entirely if so. Both checks are quick and need no root.
+pub fn system_prereqs_present() -> bool {
+    Command::new("dpkg")
+        .args(["-s", "wine32:i386"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+        && Command::new("which")
+            .arg("winetricks")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+}
+
+/// Runs the privileged one-time setup via pkexec. Same pattern as MKI's
+/// install.rs — bails with a clear message if pkexec/polkit isn't available
+/// or the user cancels the auth prompt.
+pub fn run_system_setup() -> Result<()> {
+    if !Path::new(SCRIPT).exists() {
+        bail!("Privileged script not found at {}", SCRIPT);
+    }
+    let status = Command::new("pkexec")
+        .arg(SCRIPT)
+        .status()
+        .context("Failed to launch pkexec — is polkit installed?")?;
+    if !status.success() {
+        let code = status.code().unwrap_or(-1);
+        if code == 126 || code == 127 {
+            bail!("Authentication was cancelled.");
+        }
+        bail!(
+            "Script exited with code {} (see /var/log/proton-trainer.log)",
+            code
+        );
+    }
+    Ok(())
+}
+
+/// Runs `winetricks -q dotnet48 win10` against the target prefix. No
+/// privilege escalation — this only touches files the user already owns.
+/// Output is captured (rather than just the exit status) so a failure can
+/// be surfaced to the user with the actual winetricks error, and appended
+/// to the same log the privileged script writes to, for a single place to
+/// look.
+pub fn install_dotnet48(prefix_dir: &Path) -> Result<()> {
+    let output = Command::new("winetricks")
+        .env("WINEPREFIX", prefix_dir)
+        .args(["-q", "dotnet48", "win10"])
+        .output()
+        .context("Failed to launch winetricks — is it installed?")?;
+
+    append_to_log(&output.stdout, &output.stderr);
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let tail = if stderr.trim().is_empty() {
+            String::from_utf8_lossy(&output.stdout).into_owned()
+        } else {
+            stderr.into_owned()
+        };
+        bail!(
+            "winetricks exited with code {:?} installing dotnet48: {}",
+            output.status.code(),
+            tail.trim()
+        );
+    }
+    Ok(())
+}
+
+/// Best-effort: the log file is created root-owned by privileged-setup.sh,
+/// so appending as a normal user may not be possible — that's fine, the
+/// caller still gets the output via the returned Result.
+fn append_to_log(stdout: &[u8], stderr: &[u8]) {
+    let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(LOGFILE)
+    else {
+        return;
+    };
+    let _ = writeln!(f, "[proton-trainer] ==== winetricks dotnet48 output ====");
+    let _ = f.write_all(stdout);
+    let _ = f.write_all(stderr);
+}
