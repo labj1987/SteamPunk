@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.3 — 2026-08-04
+
+- 0.1.2 corrected the `UPDATE_INFORMATION` string but the fix never took
+  effect: `build-appimage.sh` passed it to `appimagetool` as an
+  environment variable, and this appimagetool build (continuous, git
+  8c8c91f) silently ignores that env var — it only reads update info via
+  the `-u`/`--updateinformation` CLI flag. Confirmed by inspecting the
+  0.1.2 release AppImage's `.upd_info` ELF section: empty. Switched to
+  passing `-u "$UPDATE_INFORMATION"` as an argument.
+
 ## 0.1.2 — 2026-08-04
 
 - Fixed `UPDATE_INFORMATION` in `build-appimage.sh` to reference the
