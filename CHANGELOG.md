@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.5 — 2026-08-04
+
+- The 0.1.1/0.1.3/0.1.4 fixes addressed real GTK-window-subclass dialogs
+  but the phantom dock icon persisted immediately at launch, before any
+  dialog could fire. Root cause: `proton-trainer.desktop` was missing
+  `StartupNotify=true`. Without it, GNOME Shell has no way to associate
+  the launch sequence with the eventual mapped window, so it leaves an
+  orphaned placeholder entry in the dock (generic icon, tooltip showing
+  only the raw `io.github.labj1987.ProtonTrainer` app ID) alongside the
+  real, correctly-iconed window. NVI already had `StartupNotify=true` and
+  never exhibited this. Added the line to match.
+
 ## 0.1.4 — 2026-08-04
 
 - The About dialog used `gtk4::AboutDialog`, and the Troubleshoot dialog
