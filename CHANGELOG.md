@@ -1,6 +1,19 @@
 # Changelog
 
-## 0.1.5 — 2026-08-04
+## 0.1.6 — 2026-08-04
+
+- Root cause of the persistent phantom taskbar entry confirmed with
+  `WAYLAND_DEBUG=1 <appimage> 2>&1 | grep set_app_id`: on Wayland, GTK4
+  announces the GApplication ID (`io.github.labj1987.ProtonTrainer`) as
+  the toplevel's `app_id`, not `prgname`. The `.desktop` file's
+  `StartupWMClass` was set to the old prgname (`proton-trainer`), so
+  GNOME Shell couldn't match the running window to the desktop
+  launcher — one process, two dock entries. Fixed by setting both
+  `prgname` (in `main.rs`) and `StartupWMClass` (in the `.desktop`
+  file) to the application ID, so the match works regardless of
+  backend. The AboutDialog/Dialog conversions and `StartupNotify=true`
+  from 0.1.1–0.1.5 were reasonable but orthogonal — this is the actual
+  fix.
 
 - The 0.1.1/0.1.3/0.1.4 fixes addressed real GTK-window-subclass dialogs
   but the phantom dock icon persisted immediately at launch, before any

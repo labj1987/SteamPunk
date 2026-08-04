@@ -8,4 +8,4 @@ Type=Application
 Categories=Game;Utility;
 Keywords=proton;steam;trainer;wine;cheat;
 StartupNotify=true
-StartupWMClass=proton-trainer
+StartupWMClass=io.github.labj1987.ProtonTrainer
