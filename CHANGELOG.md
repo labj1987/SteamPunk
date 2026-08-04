@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.1 — 2026-08-04
+
+- Fixed a phantom, unnamed taskbar/dock window appearing whenever the
+  one-time .NET 4.0 setup dialog was shown. It used
+  `libadwaita::MessageDialog`, a `Gtk.Window` subclass that creates a real
+  separate top-level Wayland surface without the app's icon/app_id.
+  Switched to `libadwaita::AlertDialog`, which renders as a sheet inside
+  the main window's own surface instead.
+
 ## 0.1.0 — 2026-07-17
 
 Initial release.
