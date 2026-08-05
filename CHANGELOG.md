@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.1.13 — 2026-08-05
+
+- Fixed trainers that open but never attach — the window appears with an empty
+  option list and blank game name/process ID, or reports "This trainer requires
+  .NET Framework 4.6.2 or higher". Current FLiNG trainers need .NET 4.6.2+,
+  while older ones run on 4.0, so a prefix could work for one game and fail for
+  another with no obvious difference. The .NET check now verifies everything
+  that actually has to hold: clr.dll present, a real (non-builtin) mscoree.dll,
+  the CRT libraries clr.dll imports from system32 (`*_clr0400.dll` — missing
+  these is silent, the CLR simply never loads), and a registry `Release` value
+  of 4.6.2 or newer. Checking the registry alone is not enough: wine-mono
+  advertises a 4.8 `Release` in prefixes that have no real .NET at all.
+- The one-time .NET setup now repairs a prefix by cloning a working runtime
+  from another game's Proton prefix on the same system, and only falls back to
+  the Microsoft installer when there's nothing to clone. On Wine's new wow64
+  mode that installer fails outright and its rollback strips .NET back out of
+  the prefix, so trying it first could leave a game worse off than before.
+  Cloning also needs no system packages, so the password prompt is only reached
+  when it's genuinely required.
+
 ## 0.1.12 — 2026-08-05
 
 - Fixed trainers that never open at all against certain games — spawned,

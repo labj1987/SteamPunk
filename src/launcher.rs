@@ -204,28 +204,111 @@ fn is_wine_builtin_dll(path: &Path) -> bool {
         .any(|w| w == WINE_BUILTIN_DLL_MARKER)
 }
 
-/// Real, working .NET 4.0 requires both: clr.dll present (wine-mono never
-/// creates this file, so its absence means dotnet40 hasn't been installed
-/// via winetricks yet) AND system32/mscoree.dll being an actual native DLL
-/// rather than Wine's non-functional builtin stub — clr.dll alone is
-/// necessary but not sufficient, since apps import mscoree.dll directly and
-/// a prefix can end up with the override set to "native" but the builtin
-/// stub still physically in place (observed: exit 53 / STATUS_DLL_NOT_FOUND
-/// on mscoree import despite clr.dll being present and correct).
-pub fn has_dotnet40(target: &LaunchTarget) -> bool {
-    let clr_present = target
-        .prefix_dir()
-        .join("drive_c/windows/Microsoft.NET/Framework64/v4.0.30319/clr.dll")
-        .is_file();
-    let mscoree_path = target.prefix_dir().join("drive_c/windows/system32/mscoree.dll");
-    let mscoree_is_native = mscoree_path.is_file() && !is_wine_builtin_dll(&mscoree_path);
+/// `Release` value of .NET Framework 4.6.2 — the minimum current FLiNG
+/// trainers accept ("This trainer requires .NET Framework 4.6.2 or higher").
+/// Older trainers run happily on 4.0, which is why a prefix can look fine for
+/// one game and fail for another.
+const DOTNET_462_RELEASE: u32 = 394802;
 
-    let present = clr_present && mscoree_is_native;
+/// CRT libraries `clr.dll` links against, installed into system32/syswow64 by
+/// the .NET installer itself (not under Microsoft.NET/). Copying the runtime
+/// tree without these leaves a prefix that looks complete but where the CLR
+/// never loads — Wine logs `err:module:import_dll` for each and the managed
+/// process dies before `main`.
+const CLR_CRT_SUFFIX: &str = "_clr0400.dll";
+
+/// Everything that has to be true for a modern .NET trainer to actually run.
+pub struct DotnetStatus {
+    pub clr_present: bool,
+    pub mscoree_native: bool,
+    pub crt_present: bool,
+    pub release: Option<u32>,
+}
+
+impl DotnetStatus {
+    pub fn is_usable(&self) -> bool {
+        self.clr_present
+            && self.mscoree_native
+            && self.crt_present
+            && self.release.is_some_and(|r| r >= DOTNET_462_RELEASE)
+    }
+}
+
+/// Case-insensitive lookup — the .NET installer and our own copies disagree on
+/// casing (`VCRUNTIME140_CLR0400.dll` in clr.dll's import table vs
+/// `vcruntime140_clr0400.dll` on disk), and Linux filesystems care.
+fn find_file_ci(dir: &Path, name: &str) -> Option<PathBuf> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    entries.flatten().map(|e| e.path()).find(|p| {
+        p.file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.eq_ignore_ascii_case(name))
+    })
+}
+
+fn dir_has_suffix_ci(dir: &Path, suffix: &str) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries.flatten().any(|e| {
+        e.file_name()
+            .to_str()
+            .is_some_and(|n| n.to_ascii_lowercase().ends_with(suffix))
+    })
+}
+
+/// Parse `Release` out of `NDP\v4\Full` in a prefix's system.reg. This is the
+/// canonical way to tell 4.8 from 4.0 — both live in the same
+/// `v4.0.30319` directory, so the path alone says nothing about the version.
+fn dotnet_release(prefix: &Path) -> Option<u32> {
+    parse_dotnet_release(&std::fs::read_to_string(prefix.join("system.reg")).ok()?)
+}
+
+fn parse_dotnet_release(text: &str) -> Option<u32> {
+    let mut in_full = false;
+    for line in text.lines() {
+        if line.starts_with('[') {
+            in_full = line.starts_with(r"[Software\\Microsoft\\NET Framework Setup\\NDP\\v4\\Full]");
+            continue;
+        }
+        if in_full {
+            if let Some(hex) = line.strip_prefix(r#""Release"=dword:"#) {
+                return u32::from_str_radix(hex.trim(), 16).ok();
+            }
+        }
+    }
+    None
+}
+
+pub fn dotnet_status(prefix: &Path) -> DotnetStatus {
+    let system32 = prefix.join("drive_c/windows/system32");
+    let mscoree = system32.join("mscoree.dll");
+    DotnetStatus {
+        clr_present: prefix
+            .join("drive_c/windows/Microsoft.NET/Framework64/v4.0.30319/clr.dll")
+            .is_file(),
+        mscoree_native: mscoree.is_file() && !is_wine_builtin_dll(&mscoree),
+        crt_present: dir_has_suffix_ci(&system32, CLR_CRT_SUFFIX),
+        release: dotnet_release(prefix),
+    }
+}
+
+/// True when the prefix can actually run a current .NET trainer. Each
+/// component is logged because they fail independently — a prefix can have a
+/// real mscoree.dll and a 4.8 registry while still missing the CRT files.
+pub fn has_usable_dotnet(target: &LaunchTarget) -> bool {
+    let s = dotnet_status(&target.prefix_dir());
+    let usable = s.is_usable();
     crate::applog::log(&format!(
-        "has_dotnet40 -> {present} (clr.dll present: {clr_present}, \
-         system32/mscoree.dll is a real DLL: {mscoree_is_native})"
+        "has_usable_dotnet -> {usable} (clr.dll: {}, native mscoree.dll: {}, \
+         clr CRT libs: {}, Release: {})",
+        s.clr_present,
+        s.mscoree_native,
+        s.crt_present,
+        s.release
+            .map_or_else(|| "absent".to_string(), |r| format!("{r} (need >= {DOTNET_462_RELEASE})")),
     ));
-    present
+    usable
 }
 
 /// Logs each `dosdevices/` drive-letter mapping in the prefix and whether its
@@ -350,17 +433,137 @@ pub fn launch_trainer(target: &LaunchTarget, trainer_path: &Path, log_path: &Pat
     Ok(())
 }
 
-/// Fallback for when winetricks' automated .NET install still leaves Wine's
-/// own builtin mscoree.dll in place even with `-f` (observed cause on Wine's
-/// new wow64 mode: the installer's own NGEN helper process needs a working
-/// mscoree.dll just to start, so it can crash before ever writing a real
-/// one — a bootstrapping deadlock winetricks doesn't recover from). Since
-/// mscoree.dll is a thin, largely version-generic redirector — the actual
-/// versioned CLR implementation lives in Framework(64)/v.../mscoreei.dll,
-/// which winetricks *does* install correctly — copying a real mscoree.dll
-/// from another Proton prefix on the same system is a known-safe fix.
-/// Returns Ok(true) if a sibling prefix had one to borrow and it was copied.
-pub fn repair_mscoree_from_sibling_prefix(target: &LaunchTarget) -> Result<bool> {
+/// The system32/syswow64 files a copied runtime tree depends on: the CLR's own
+/// CRT builds plus the mscoree.dll shim. The .NET installer puts these outside
+/// Microsoft.NET/, so cloning only that tree leaves a prefix that looks
+/// complete but can't load the CLR.
+fn dotnet_system_files(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.to_ascii_lowercase())
+                .is_some_and(|n| n.ends_with(CLR_CRT_SUFFIX) || n == "mscoree.dll")
+        })
+        .collect()
+}
+
+fn copy_dir_all(from: &Path, to: &Path) -> Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)?.flatten() {
+        let src = entry.path();
+        let dst = to.join(entry.file_name());
+        if src.is_dir() {
+            copy_dir_all(&src, &dst)?;
+        } else {
+            std::fs::copy(&src, &dst)
+                .with_context(|| format!("copying {} -> {}", src.display(), dst.display()))?;
+        }
+    }
+    Ok(())
+}
+
+/// Convert the .NET sections of a prefix's system.reg into a .reg file for
+/// regedit. Wine writes system.reg with doubled backslashes in key paths and a
+/// timestamp after each key, neither of which regedit accepts.
+///
+/// Importing through regedit rather than editing system.reg directly is
+/// deliberate: the game's wineserver keeps the registry in memory and would
+/// overwrite a direct edit on its next flush.
+fn dotnet_reg_export(system_reg: &str) -> String {
+    const WANTED: [&str; 4] = [
+        r"Software\\Microsoft\\NET Framework Setup",
+        r"Software\\Wow6432Node\\Microsoft\\NET Framework Setup",
+        r"Software\\Microsoft\\.NETFramework",
+        r"Software\\Wow6432Node\\Microsoft\\.NETFramework",
+    ];
+
+    let mut out = String::from("Windows Registry Editor Version 5.00\n");
+    let mut keep = false;
+    let mut continuing = false;
+
+    for line in system_reg.lines() {
+        if line.starts_with('[') {
+            continuing = false;
+            let key = line[1..].split(']').next().unwrap_or_default();
+            keep = WANTED
+                .iter()
+                .any(|w| key == *w || key.starts_with(&format!("{w}\\\\")));
+            if keep {
+                out.push_str("\n[HKEY_LOCAL_MACHINE\\");
+                out.push_str(&key.replace("\\\\", "\\"));
+                out.push_str("]\n");
+            }
+            continue;
+        }
+        if !keep {
+            continue;
+        }
+        // Values can wrap across lines with a trailing backslash (long hex
+        // blobs do this routinely), so a continuation is copied verbatim
+        // rather than re-tested for a leading quote.
+        if continuing {
+            out.push_str(line);
+            out.push('\n');
+            continuing = line.ends_with('\\');
+        } else if line.starts_with('"') || line.starts_with('@') {
+            out.push_str(line);
+            out.push('\n');
+            continuing = line.ends_with('\\');
+        }
+    }
+    out
+}
+
+fn apply_dotnet_registry(target: &LaunchTarget, donor_prefix: &Path) -> Result<()> {
+    let donor_reg_path = donor_prefix.join("system.reg");
+    let donor_reg = std::fs::read_to_string(&donor_reg_path)
+        .with_context(|| format!("reading {}", donor_reg_path.display()))?;
+
+    let temp_dir = target.prefix_dir().join("drive_c/windows/temp");
+    std::fs::create_dir_all(&temp_dir)?;
+    let reg_path = temp_dir.join("proton-trainer-dotnet.reg");
+    std::fs::write(&reg_path, dotnet_reg_export(&donor_reg))
+        .with_context(|| format!("writing {}", reg_path.display()))?;
+
+    let proton = target.proton_dir.join("proton");
+    let status = std::process::Command::new(&proton)
+        .arg("runinprefix")
+        .arg("regedit")
+        .arg("/S")
+        .arg(r"C:\windows\temp\proton-trainer-dotnet.reg")
+        .env("STEAM_COMPAT_CLIENT_INSTALL_PATH", &target.client_dir)
+        .env("STEAM_COMPAT_DATA_PATH", &target.compatdata_dir)
+        .status()
+        .with_context(|| format!("running regedit via {}", proton.display()))?;
+
+    crate::applog::log(&format!("apply_dotnet_registry: regedit exited {status:?}"));
+    if !status.success() {
+        return Err(anyhow!("regedit failed to import .NET registry keys ({status})"));
+    }
+    Ok(())
+}
+
+/// Rebuild a prefix's .NET runtime by cloning it from another Proton prefix on
+/// this system that already has a working one.
+///
+/// This is the preferred repair rather than a last resort: on Wine's new wow64
+/// mode the Microsoft installers winetricks drives fail outright (status 67,
+/// `Failed to extract cabinet: netfx_core.mzz`) and their rollback strips .NET
+/// back out, leaving the prefix worse off than before it was attempted.
+///
+/// All four pieces have to move together — the runtime tree, the GAC, the CRT
+/// libraries clr.dll imports from system32, and the registry that reports the
+/// version — since a prefix missing any single one of them still fails, just
+/// with a less obvious symptom.
+///
+/// Returns Ok(false) if no prefix on this system had a usable .NET to clone.
+pub fn repair_dotnet_from_sibling_prefix(target: &LaunchTarget) -> Result<bool> {
     let Some(compatdata_root) = target.compatdata_dir.parent() else {
         return Ok(false);
     };
@@ -368,53 +571,105 @@ pub fn repair_mscoree_from_sibling_prefix(target: &LaunchTarget) -> Result<bool>
         return Ok(false);
     };
 
-    for entry in entries.flatten() {
-        let donor_pfx = entry.path().join("pfx");
-        if donor_pfx == target.prefix_dir() {
-            continue;
-        }
-        let donor_sys32 = donor_pfx.join("drive_c/windows/system32/mscoree.dll");
-        if !donor_sys32.is_file() || is_wine_builtin_dll(&donor_sys32) {
-            continue;
-        }
+    let ours = target.prefix_dir();
+    let donor = entries
+        .flatten()
+        .map(|e| e.path().join("pfx"))
+        .filter(|p| *p != ours)
+        .find(|p| dotnet_status(p).is_usable());
 
-        let our_sys32 = target
-            .prefix_dir()
-            .join("drive_c/windows/system32/mscoree.dll");
-        std::fs::copy(&donor_sys32, &our_sys32).with_context(|| {
-            format!("copying {} -> {}", donor_sys32.display(), our_sys32.display())
-        })?;
-        crate::applog::log(&format!(
-            "repair_mscoree_from_sibling_prefix: copied {} -> {}",
-            donor_sys32.display(),
-            our_sys32.display()
-        ));
+    let Some(donor) = donor else {
+        crate::applog::log(
+            "repair_dotnet_from_sibling_prefix: no prefix on this system has a usable .NET to clone",
+        );
+        return Ok(false);
+    };
+    crate::applog::log(&format!(
+        "repair_dotnet_from_sibling_prefix: cloning .NET from {}",
+        donor.display()
+    ));
 
-        let donor_syswow64 = donor_pfx.join("drive_c/windows/syswow64/mscoree.dll");
-        if donor_syswow64.is_file() {
-            let our_syswow64 = target
-                .prefix_dir()
-                .join("drive_c/windows/syswow64/mscoree.dll");
-            std::fs::copy(&donor_syswow64, &our_syswow64).with_context(|| {
-                format!(
-                    "copying {} -> {}",
-                    donor_syswow64.display(),
-                    our_syswow64.display()
-                )
-            })?;
-            crate::applog::log(&format!(
-                "repair_mscoree_from_sibling_prefix: copied {} -> {}",
-                donor_syswow64.display(),
-                our_syswow64.display()
-            ));
+    for tree in ["drive_c/windows/Microsoft.NET", "drive_c/windows/assembly"] {
+        let from = donor.join(tree);
+        if from.is_dir() {
+            copy_dir_all(&from, &ours.join(tree)).with_context(|| format!("cloning {tree}"))?;
+            crate::applog::log(&format!("repair_dotnet_from_sibling_prefix: cloned {tree}"));
         }
-        return Ok(true);
     }
 
-    crate::applog::log(
-        "repair_mscoree_from_sibling_prefix: no sibling prefix had a usable mscoree.dll",
+    for dir in ["drive_c/windows/system32", "drive_c/windows/syswow64"] {
+        let to = ours.join(dir);
+        if !to.is_dir() {
+            continue;
+        }
+        for src in dotnet_system_files(&donor.join(dir)) {
+            let Some(name) = src.file_name() else { continue };
+            // Overwrite whatever is there under its existing casing — what's
+            // present is typically Wine's builtin stub or a 4.0-era copy, and
+            // both are exactly the problem being repaired.
+            let dst = find_file_ci(&to, &name.to_string_lossy()).unwrap_or_else(|| to.join(name));
+            std::fs::copy(&src, &dst)
+                .with_context(|| format!("copying {} -> {}", src.display(), dst.display()))?;
+        }
+        crate::applog::log(&format!(
+            "repair_dotnet_from_sibling_prefix: copied CLR support libraries into {dir}"
+        ));
+    }
+
+    apply_dotnet_registry(target, &donor)?;
+    Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SAMPLE: &str = concat!(
+        "WINE REGISTRY Version 2\n",
+        "#arch=win64\n",
+        "\n",
+        r"[Software\\Microsoft\\NET Framework Setup\\NDP\\v4\\Full] 1785895174",
+        "\n",
+        "#time=1dd247e0fdefec8\n",
+        "\"Install\"=dword:00000001\n",
+        "\"Release\"=dword:00080eb1\n",
+        "\"Version\"=\"4.8.03761\"\n",
+        "\n",
+        r"[Software\\Valve\\Steam] 123",
+        "\n",
+        "\"Unrelated\"=\"leave me alone\"\n",
     );
-    Ok(false)
+
+    #[test]
+    fn reg_export_selects_dotnet_keys_and_unescapes_them() {
+        let out = dotnet_reg_export(SAMPLE);
+        assert!(out.starts_with("Windows Registry Editor Version 5.00\n"));
+        assert!(out.contains(
+            r"[HKEY_LOCAL_MACHINE\Software\Microsoft\NET Framework Setup\NDP\v4\Full]"
+        ));
+        assert!(out.contains("\"Release\"=dword:00080eb1"));
+    }
+
+    #[test]
+    fn reg_export_drops_unrelated_keys_and_wine_metadata() {
+        let out = dotnet_reg_export(SAMPLE);
+        assert!(!out.contains("Unrelated"));
+        assert!(!out.contains("Valve"));
+        assert!(!out.contains("#time="));
+        assert!(!out.contains("1785895174"));
+    }
+
+    #[test]
+    fn release_is_read_from_the_v4_full_key() {
+        assert_eq!(parse_dotnet_release(SAMPLE), Some(0x00080eb1));
+        assert!(parse_dotnet_release(SAMPLE).is_some_and(|r| r >= DOTNET_462_RELEASE));
+    }
+
+    #[test]
+    fn release_is_absent_when_only_dotnet40_is_installed() {
+        let dotnet40 = SAMPLE.replace("\"Release\"=dword:00080eb1\n", "");
+        assert_eq!(parse_dotnet_release(&dotnet40), None);
+    }
 }
 
 /// Kill every running trainer: their unpacked TrainerCacheData helper

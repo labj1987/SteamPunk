@@ -362,7 +362,7 @@ fn wire_launch_button(
                     }
                 };
 
-                if !launcher::has_dotnet40(&target) {
+                if !launcher::has_usable_dotnet(&target) {
                     show_dotnet_dialog(&window, target, trainer, toast_overlay);
                     return;
                 }
@@ -485,26 +485,25 @@ fn run_automatic_setup(target: LaunchTarget, trainer: Trainer, toast_overlay: To
     spawn_async(
         async move {
             tokio::task::spawn_blocking(move || -> anyhow::Result<LaunchTarget> {
-                if !setup::system_prereqs_present() {
-                    setup::run_system_setup()?;
-                }
-                setup::install_dotnet48(&target.prefix_dir())?;
-
-                // winetricks can report success while still leaving Wine's
-                // non-functional builtin mscoree.dll in place (observed on
-                // Wine's new wow64 mode — see repair_mscoree_from_sibling_prefix).
-                // Confirm the install actually took, and fall back to
-                // borrowing a working copy from another prefix if not.
-                if !launcher::has_dotnet40(&target) {
-                    if !launcher::repair_mscoree_from_sibling_prefix(&target)?
-                        || !launcher::has_dotnet40(&target)
-                    {
-                        anyhow::bail!(
-                            "The .NET installer ran but didn't complete successfully, and no \
-                             other game's Proton prefix on this system had a working copy to \
-                             borrow. Try again, or check /var/log/proton-trainer.log."
-                        );
+                // Cloning from a prefix that already works is tried first, and
+                // the Microsoft installer only as a fallback: on Wine's new
+                // wow64 mode that installer fails outright and its rollback
+                // strips .NET back out, leaving the prefix worse than it
+                // started. Cloning needs no system packages either, so the
+                // pkexec prompt is only reached when there's nothing to clone.
+                if !launcher::repair_dotnet_from_sibling_prefix(&target)? {
+                    if !setup::system_prereqs_present() {
+                        setup::run_system_setup()?;
                     }
+                    setup::install_dotnet48(&target.prefix_dir())?;
+                }
+
+                if !launcher::has_usable_dotnet(&target) {
+                    anyhow::bail!(
+                        "Couldn't get a working .NET runtime into this game's prefix. No other \
+                         game's Proton prefix on this system had one to copy, and the installer \
+                         didn't complete. See the debug log (Save Debug Log) for the details."
+                    );
                 }
 
                 Ok(target)
