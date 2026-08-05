@@ -1,6 +1,6 @@
 [package]
 name = "proton-trainer"
-version = "0.1.9"
+version = "0.1.10"
 edition = "2021"
 description = "Launch Windows game trainers through Proton against a running Steam game's wine session"
 authors = ["Alex Brown"]

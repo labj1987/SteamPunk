@@ -232,7 +232,38 @@ pub fn launch_trainer(target: &LaunchTarget, trainer_path: &Path, log_path: &Pat
             return Err(e).with_context(|| format!("spawning {}", proton.display()));
         }
     };
-    crate::applog::log(&format!("launch_trainer: spawned pid {}", child.id()));
+    let pid = child.id();
+    crate::applog::log(&format!("launch_trainer: spawned pid {pid}"));
+
+    // Report back to the caller immediately (the toast shouldn't wait on
+    // this) but keep watching in the background: FLiNG trainers unpack
+    // themselves and relaunch, so this initial process exiting quickly is
+    // normal — logged as information, not an error — but the exit status
+    // and anything it wrote to log_path (captured above) are the only
+    // window we get into a Proton/wine-level failure our own code can't see.
+    std::thread::spawn(move || {
+        let mut child = child;
+        for _ in 0..10 {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    crate::applog::log(&format!(
+                        "launch_trainer: pid {pid} exited with {status} \
+                         (a quick exit here is expected — FLiNG trainers unpack \
+                         and relaunch themselves; check the output above/below \
+                         this line and the exit code for signs of an actual error)"
+                    ));
+                    return;
+                }
+                Ok(None) => continue,
+                Err(e) => {
+                    crate::applog::log(&format!("launch_trainer: try_wait error for pid {pid}: {e}"));
+                    return;
+                }
+            }
+        }
+        crate::applog::log(&format!("launch_trainer: pid {pid} still running after 2s"));
+    });
 
     Ok(())
 }

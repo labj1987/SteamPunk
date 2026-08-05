@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.10 — 2026-08-05
+
+- The debug log now watches the spawned Proton process for up to 2 seconds
+  after launch and records its exit status, without delaying the "Launched"
+  toast — giving visibility into Proton/wine-level failures that happen
+  after our own code hands off, which the log previously couldn't see.
+
 ## 0.1.9 — 2026-08-04
 
 - Added a unified, per-session debug log covering everything the app does —
