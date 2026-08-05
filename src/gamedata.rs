@@ -48,7 +48,7 @@ pub async fn fetch_and_cache(appid: u32) -> Result<()> {
     std::fs::create_dir_all(&dir)?;
 
     let client = reqwest::Client::builder()
-        .user_agent("steampunk (https://github.com/labj1987/proton-trainer)")
+        .user_agent("steampunk (https://github.com/labj1987/steampunk)")
         .timeout(Duration::from_secs(10))
         .build()?;
 

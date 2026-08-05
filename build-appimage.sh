@@ -98,9 +98,7 @@ fi
 echo "==> Packing AppImage"
 OUT="$APP-$VERSION-$ARCH.AppImage"
 
-# Repo field stays "proton-trainer" until/unless the GitHub repo itself is
-# renamed — the update spec resolves releases through the repo name.
-UPDATE_INFORMATION="gh-releases-zsync|labj1987|proton-trainer|latest|steampunk-*-x86_64.AppImage.zsync"
+UPDATE_INFORMATION="gh-releases-zsync|labj1987|steampunk|latest|steampunk-*-x86_64.AppImage.zsync"
 VERSION="$VERSION" ARCH="$ARCH" "$TOOL" --appimage-extract-and-run \
     -u "$UPDATE_INFORMATION" "$APPDIR" "$OUT"
 
