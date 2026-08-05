@@ -98,7 +98,7 @@ fi
 echo "==> Packing AppImage"
 OUT="$APP-$VERSION-$ARCH.AppImage"
 
-UPDATE_INFORMATION="gh-releases-zsync|labj1987|steampunk|latest|steampunk-*-x86_64.AppImage.zsync"
+UPDATE_INFORMATION="gh-releases-zsync|labj1987|SteamPunk|latest|steampunk-*-x86_64.AppImage.zsync"
 VERSION="$VERSION" ARCH="$ARCH" "$TOOL" --appimage-extract-and-run \
     -u "$UPDATE_INFORMATION" "$APPDIR" "$OUT"
 
