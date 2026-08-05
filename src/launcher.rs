@@ -189,6 +189,47 @@ pub fn has_dotnet40(target: &LaunchTarget) -> bool {
     present
 }
 
+/// Logs each `dosdevices/` drive-letter mapping in the prefix and whether its
+/// target actually resolves — a stale or broken one here is a known source
+/// of Wine returning ERROR_BAD_NETPATH ("network path not found") for
+/// otherwise-valid paths, and this is the only place our own code can look
+/// before handing off to Proton.
+fn log_dosdevices(target: &LaunchTarget) {
+    let dosdevices = target.prefix_dir().join("dosdevices");
+    let Ok(entries) = std::fs::read_dir(&dosdevices) else {
+        crate::applog::log(&format!(
+            "launch_trainer: could not read {}",
+            dosdevices.display()
+        ));
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        // Only drive letters (e.g. "c:", "z:") matter for path resolution —
+        // com1..com32/lpt1..lpt3 are Wine's default virtual port symlinks,
+        // routinely dangling on any machine without legacy serial hardware,
+        // and would just bury the real signal in expected-looking noise.
+        let is_drive_letter = matches!(entry.file_name().to_str(), Some(n) if n.len() == 2 && n.ends_with(':'));
+        if !is_drive_letter {
+            continue;
+        }
+        // read_link (not the entry's own target) since dosdevices symlinks
+        // are commonly relative to the dosdevices dir itself — canonicalize
+        // resolves that correctly, and its success/failure is the existence
+        // check (safer than testing the raw link string, which would
+        // resolve relative targets against our own CWD instead).
+        let Ok(link_target) = std::fs::read_link(&path) else {
+            continue;
+        };
+        let resolves = std::fs::canonicalize(&path).is_ok();
+        crate::applog::log(&format!(
+            "launch_trainer: dosdevice {} -> {} (resolves: {resolves})",
+            path.display(),
+            link_target.display()
+        ));
+    }
+}
+
 /// Launch a trainer against the resolved target, detached: the FLiNG exe
 /// unpacks itself to a TrainerCacheData folder and relaunches, so this
 /// initial process exiting quickly is expected, not a failure.
@@ -205,6 +246,8 @@ pub fn launch_trainer(target: &LaunchTarget, trainer_path: &Path, log_path: &Pat
         .open(log_path)
         .with_context(|| format!("opening log file {}", log_path.display()))?;
     let log_err = log_out.try_clone()?;
+
+    log_dosdevices(target);
 
     let proton = target.proton_dir.join("proton");
     crate::applog::log(&format!(

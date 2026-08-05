@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.11 — 2026-08-05
+
+- The debug log now records the prefix's drive-letter mappings
+  (`dosdevices/c:`, `z:`, etc.) and whether each one's target actually
+  resolves, right before launching a trainer. A stale or broken mapping
+  here is a known cause of Wine returning "network path not found" for an
+  otherwise-valid path — something our own code previously had no way to
+  see. COM/LPT port symlinks are skipped since those are unrelated to file
+  paths and routinely dangling on machines without legacy serial hardware.
+
 ## 0.1.10 — 2026-08-05
 
 - The debug log now watches the spawned Proton process for up to 2 seconds
