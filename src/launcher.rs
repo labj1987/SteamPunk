@@ -143,16 +143,29 @@ fn find_proton_dir(compatdata_dir: &Path) -> Option<PathBuf> {
 /// Resolve everything needed to launch: the running game, its compatdata,
 /// and the Proton build whose wineserver it's actually using.
 pub fn resolve_launch_target() -> Result<LaunchTarget> {
-    let appid = find_running_appid().ok_or_else(|| {
+    let found_appid = find_running_appid();
+    crate::applog::log(&format!("resolve_launch_target: find_running_appid -> {found_appid:?}"));
+    let appid = found_appid.ok_or_else(|| {
         anyhow!("Start the game first, load past the menus, then launch the trainer.")
     })?;
 
+    let client_dir = steam::steam_client_dir();
+    crate::applog::log(&format!("resolve_launch_target: steam_client_dir -> {client_dir:?}"));
     let client_dir =
-        steam::steam_client_dir().ok_or_else(|| anyhow!("Could not find a Steam installation."))?;
+        client_dir.ok_or_else(|| anyhow!("Could not find a Steam installation."))?;
+
     let libraries = steam::library_folders(&client_dir);
-    let compatdata_dir = steam::compatdata_dir(&libraries, &appid.to_string())
+    let compatdata_dir = steam::compatdata_dir(&libraries, &appid.to_string());
+    crate::applog::log(&format!(
+        "resolve_launch_target: compatdata_dir for AppId {appid} -> {compatdata_dir:?} (searched {} libraries)",
+        libraries.len()
+    ));
+    let compatdata_dir = compatdata_dir
         .ok_or_else(|| anyhow!("Could not find compatdata for AppId {appid}."))?;
-    let proton_dir = find_proton_dir(&compatdata_dir).ok_or_else(|| {
+
+    let proton_dir = find_proton_dir(&compatdata_dir);
+    crate::applog::log(&format!("resolve_launch_target: find_proton_dir -> {proton_dir:?}"));
+    let proton_dir = proton_dir.ok_or_else(|| {
         anyhow!("Could not determine which Proton build the game is currently running.")
     })?;
 
@@ -168,10 +181,12 @@ pub fn resolve_launch_target() -> Result<LaunchTarget> {
 /// never creates this file, so its absence means dotnet40 hasn't been
 /// installed via winetricks yet.
 pub fn has_dotnet40(target: &LaunchTarget) -> bool {
-    target
+    let present = target
         .prefix_dir()
         .join("drive_c/windows/Microsoft.NET/Framework64/v4.0.30319/clr.dll")
-        .is_file()
+        .is_file();
+    crate::applog::log(&format!("has_dotnet40 -> {present}"));
+    present
 }
 
 /// Launch a trainer against the resolved target, detached: the FLiNG exe
@@ -192,7 +207,14 @@ pub fn launch_trainer(target: &LaunchTarget, trainer_path: &Path, log_path: &Pat
     let log_err = log_out.try_clone()?;
 
     let proton = target.proton_dir.join("proton");
-    Command::new(&proton)
+    crate::applog::log(&format!(
+        "launch_trainer: {} runinprefix {} (STEAM_COMPAT_CLIENT_INSTALL_PATH={} STEAM_COMPAT_DATA_PATH={})",
+        proton.display(),
+        trainer_path.display(),
+        target.client_dir.display(),
+        target.compatdata_dir.display(),
+    ));
+    let spawn_result = Command::new(&proton)
         .arg("runinprefix")
         .arg(trainer_path)
         .env("STEAM_COMPAT_CLIENT_INSTALL_PATH", &target.client_dir)
@@ -201,8 +223,16 @@ pub fn launch_trainer(target: &LaunchTarget, trainer_path: &Path, log_path: &Pat
         .stdout(log_out)
         .stderr(log_err)
         .process_group(0)
-        .spawn()
-        .with_context(|| format!("spawning {}", proton.display()))?;
+        .spawn();
+
+    let child = match spawn_result {
+        Ok(child) => child,
+        Err(e) => {
+            crate::applog::log(&format!("launch_trainer: spawn failed: {e}"));
+            return Err(e).with_context(|| format!("spawning {}", proton.display()));
+        }
+    };
+    crate::applog::log(&format!("launch_trainer: spawned pid {}", child.id()));
 
     Ok(())
 }
@@ -210,14 +240,19 @@ pub fn launch_trainer(target: &LaunchTarget, trainer_path: &Path, log_path: &Pat
 /// Kill every running trainer: their unpacked TrainerCacheData helper
 /// process, plus anything still referencing the managed trainers dir.
 pub fn stop_all(trainers_dir: &Path) {
-    let _ = std::process::Command::new("pkill")
+    let s1 = std::process::Command::new("pkill")
         .arg("-f")
         .arg("TrainerCacheData")
         .status();
-    let _ = std::process::Command::new("pkill")
+    crate::applog::log(&format!("stop_all: pkill -f TrainerCacheData -> {s1:?}"));
+    let s2 = std::process::Command::new("pkill")
         .arg("-f")
         .arg(trainers_dir)
         .status();
+    crate::applog::log(&format!(
+        "stop_all: pkill -f {} -> {s2:?}",
+        trainers_dir.display()
+    ));
 }
 
 /// Per-game trainer-logs directories FLiNG trainers leave behind. Each may

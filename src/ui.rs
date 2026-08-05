@@ -1,3 +1,4 @@
+use crate::applog;
 use crate::launcher::{self, LaunchTarget};
 use crate::library::{self, Trainer};
 use crate::setup;
@@ -14,7 +15,6 @@ use libadwaita::{
 };
 
 use std::cell::RefCell;
-use std::path::PathBuf;
 use std::rc::Rc;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -37,11 +37,6 @@ where
             callback(val);
         }
     });
-}
-
-fn log_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    PathBuf::from(home).join(".local/share/proton-trainer/launch.log")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -75,6 +70,12 @@ pub fn build_ui(app: &Application) {
         .tooltip_text("About")
         .build();
     header.pack_end(&about_btn);
+
+    let save_log_btn = Button::builder()
+        .icon_name("document-save-symbolic")
+        .tooltip_text("Save Debug Log")
+        .build();
+    header.pack_end(&save_log_btn);
 
     let troubleshoot_btn = Button::builder().label("Fix Stale Instance").build();
     header.pack_end(&troubleshoot_btn);
@@ -200,7 +201,9 @@ pub fn build_ui(app: &Application) {
             dialog.open(Some(&window), gio::Cancellable::NONE, move |result| {
                 let Ok(file) = result else { return };
                 let Some(path) = file.path() else { return };
-                match library::import_trainer(&path) {
+                let result = library::import_trainer(&path);
+                applog::log(&format!("UI: import_trainer({}) -> {result:?}", path.display()));
+                match result {
                     Ok(_) => {
                         refresh_list();
                         toast_overlay.add_toast(Toast::new("Trainer imported"));
@@ -300,6 +303,32 @@ pub fn build_ui(app: &Application) {
         });
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    //  Save Debug Log — bundles the app log + privileged setup log (if
+    //  readable) into one file the user picks, for handing to whoever's
+    //  troubleshooting a failed launch.
+    // ─────────────────────────────────────────────────────────────────────────
+    {
+        let window = window.clone();
+        let toast_overlay = toast_overlay.clone();
+        save_log_btn.connect_clicked(move |_| {
+            let dialog = FileDialog::builder()
+                .title("Save Debug Log")
+                .initial_name(format!("proton-trainer-log-{}.txt", applog::filename_timestamp()))
+                .build();
+
+            let toast_overlay = toast_overlay.clone();
+            dialog.save(Some(&window), gio::Cancellable::NONE, move |result| {
+                let Ok(file) = result else { return };
+                let Some(path) = file.path() else { return };
+                match applog::export_to(&path) {
+                    Ok(()) => toast_overlay.add_toast(Toast::new("Debug log saved")),
+                    Err(e) => toast_overlay.add_toast(Toast::new(&format!("Save failed: {e}"))),
+                }
+            });
+        });
+    }
+
     window.present();
 }
 
@@ -351,8 +380,9 @@ fn launch_trainer_now(target: LaunchTarget, trainer: Trainer, toast_overlay: Toa
     let trainer_name = trainer.name.clone();
     let trainer_path = trainer.path.clone();
     let toast_overlay2 = toast_overlay.clone();
-    let log = log_path();
+    let log = applog::log_path();
     let appid = target.appid;
+    applog::log(&format!("UI: Launch clicked for trainer {trainer_name}"));
 
     spawn_async(
         async move {
@@ -550,7 +580,12 @@ fn show_troubleshoot(window: &ApplicationWindow, toast_overlay: &ToastOverlay) {
                 let toast_overlay2 = toast_overlay.clone();
                 let dir2 = dir.clone();
                 clear_btn.connect_clicked(move |_| {
-                    match std::fs::remove_file(dir2.join("info.ini")) {
+                    let result = std::fs::remove_file(dir2.join("info.ini"));
+                    applog::log(&format!(
+                        "UI: cleared stale instance {} -> {result:?}",
+                        dir2.display()
+                    ));
+                    match result {
                         Ok(()) => toast_overlay2.add_toast(Toast::new("Cleared")),
                         Err(e) => {
                             toast_overlay2.add_toast(Toast::new(&format!("Failed: {e}")))

@@ -1,3 +1,4 @@
+mod applog;
 mod launcher;
 mod library;
 mod setup;
@@ -21,6 +22,7 @@ pub fn runtime() -> &'static Runtime {
 
 fn main() {
     let _ = runtime();
+    applog::init();
 
     // Set program name before GTK init. On Wayland the app_id GNOME sees is
     // the GApplication ID, not prgname; on X11 it's prgname. Setting both

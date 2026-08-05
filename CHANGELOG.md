@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.9 — 2026-08-04
+
+- Added a unified, per-session debug log covering everything the app does —
+  resolved launch targets, the exact Proton command run, setup steps, and
+  user actions — plus a new "Save Debug Log" button in the header that
+  exports it (along with the privileged setup log, if present) to a file
+  you pick, so anyone can troubleshoot a failed launch without needing a
+  terminal.
+
 ## 0.1.8 — 2026-08-04
 
 - Fixed trainers failing to launch against a running game.
