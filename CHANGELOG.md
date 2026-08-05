@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.0 — 2026-08-05
+
+- The AppID prompt shown after importing a trainer is now a live search
+  instead of a blind numeric entry. It's pre-filled with a title guessed
+  from the trainer's filename and searches Steam as you type, showing
+  each result's name and cover thumbnail to pick from. Typing or pasting
+  a raw numeric AppID still works too, via the Add button or Enter, for
+  anyone who already knows it.
+
 ## 0.2.0 — 2026-08-05
 
 proton-trainer is now SteamPunk. This is a pure rebrand of the earlier
