@@ -57,20 +57,25 @@ pub fn run_system_setup() -> Result<()> {
     Ok(())
 }
 
-/// Runs `winetricks -q dotnet48 win10` against the target prefix. No
+/// Runs `winetricks -q -f dotnet48 win10` against the target prefix. No
 /// privilege escalation — this only touches files the user already owns.
-/// Output is captured (rather than just the exit status) so a failure can
-/// be surfaced to the user with the actual winetricks error, and appended
-/// to the same log the privileged script writes to, for a single place to
-/// look.
+/// `-f` (force) matters: winetricks marks a verb done in the prefix's
+/// winetricks.log the first time it's attempted, regardless of whether the
+/// install actually completed successfully (observed: dotnet48 logged as
+/// done while system32/mscoree.dll was still Wine's non-functional builtin
+/// stub) — without `-f` a retry here would silently no-op against a prefix
+/// this dialog exists specifically to repair. Output is captured (rather
+/// than just the exit status) so a failure can be surfaced to the user with
+/// the actual winetricks error, and appended to the same log the privileged
+/// script writes to, for a single place to look.
 pub fn install_dotnet48(prefix_dir: &Path) -> Result<()> {
     crate::applog::log(&format!(
-        "install_dotnet48: running winetricks -q dotnet48 win10 (WINEPREFIX={})",
+        "install_dotnet48: running winetricks -q -f dotnet48 win10 (WINEPREFIX={})",
         prefix_dir.display()
     ));
     let output = Command::new("winetricks")
         .env("WINEPREFIX", prefix_dir)
-        .args(["-q", "dotnet48", "win10"])
+        .args(["-q", "-f", "dotnet48", "win10"])
         .output()
         .context("Failed to launch winetricks — is it installed?")?;
 

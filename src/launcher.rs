@@ -177,15 +177,54 @@ pub fn resolve_launch_target() -> Result<LaunchTarget> {
     })
 }
 
-/// Real .NET 4.0 exists in the prefix iff clr.dll is present — wine-mono
-/// never creates this file, so its absence means dotnet40 hasn't been
-/// installed via winetricks yet.
+/// The literal ASCII marker Wine embeds in the DOS-stub area of any DLL it
+/// hasn't been overridden with a real file for (confirmed via `file`/hexdump
+/// against an affected prefix — this is also how `file(1)` itself detects
+/// "PE32 executable for WINE (DLL)"). A "native" DllOverrides entry only
+/// makes Wine *prefer* a real file over this stub if one actually made it to
+/// disk — winetricks can log a dotnet verb as done, and the override can be
+/// set correctly, while this placeholder is still what's actually sitting in
+/// system32, e.g. if the underlying installer failed partway through.
+const WINE_BUILTIN_DLL_MARKER: &[u8] = b"Wine builtin DLL";
+
+/// True if `path` is Wine's own builtin placeholder rather than a real DLL.
+/// Only reads the first 1KB — the marker sits right after the DOS header on
+/// every observed builtin stub, and these files can otherwise be large.
+fn is_wine_builtin_dll(path: &Path) -> bool {
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    use std::io::Read;
+    let mut buf = [0u8; 1024];
+    let Ok(n) = file.take(1024).read(&mut buf) else {
+        return false;
+    };
+    buf[..n]
+        .windows(WINE_BUILTIN_DLL_MARKER.len())
+        .any(|w| w == WINE_BUILTIN_DLL_MARKER)
+}
+
+/// Real, working .NET 4.0 requires both: clr.dll present (wine-mono never
+/// creates this file, so its absence means dotnet40 hasn't been installed
+/// via winetricks yet) AND system32/mscoree.dll being an actual native DLL
+/// rather than Wine's non-functional builtin stub — clr.dll alone is
+/// necessary but not sufficient, since apps import mscoree.dll directly and
+/// a prefix can end up with the override set to "native" but the builtin
+/// stub still physically in place (observed: exit 53 / STATUS_DLL_NOT_FOUND
+/// on mscoree import despite clr.dll being present and correct).
 pub fn has_dotnet40(target: &LaunchTarget) -> bool {
-    let present = target
+    let clr_present = target
         .prefix_dir()
         .join("drive_c/windows/Microsoft.NET/Framework64/v4.0.30319/clr.dll")
         .is_file();
-    crate::applog::log(&format!("has_dotnet40 -> {present}"));
+    let mscoree_path = target.prefix_dir().join("drive_c/windows/system32/mscoree.dll");
+    let mscoree_is_native = mscoree_path.is_file() && !is_wine_builtin_dll(&mscoree_path);
+
+    let present = clr_present && mscoree_is_native;
+    crate::applog::log(&format!(
+        "has_dotnet40 -> {present} (clr.dll present: {clr_present}, \
+         system32/mscoree.dll is a real DLL: {mscoree_is_native})"
+    ));
     present
 }
 
@@ -309,6 +348,73 @@ pub fn launch_trainer(target: &LaunchTarget, trainer_path: &Path, log_path: &Pat
     });
 
     Ok(())
+}
+
+/// Fallback for when winetricks' automated .NET install still leaves Wine's
+/// own builtin mscoree.dll in place even with `-f` (observed cause on Wine's
+/// new wow64 mode: the installer's own NGEN helper process needs a working
+/// mscoree.dll just to start, so it can crash before ever writing a real
+/// one — a bootstrapping deadlock winetricks doesn't recover from). Since
+/// mscoree.dll is a thin, largely version-generic redirector — the actual
+/// versioned CLR implementation lives in Framework(64)/v.../mscoreei.dll,
+/// which winetricks *does* install correctly — copying a real mscoree.dll
+/// from another Proton prefix on the same system is a known-safe fix.
+/// Returns Ok(true) if a sibling prefix had one to borrow and it was copied.
+pub fn repair_mscoree_from_sibling_prefix(target: &LaunchTarget) -> Result<bool> {
+    let Some(compatdata_root) = target.compatdata_dir.parent() else {
+        return Ok(false);
+    };
+    let Ok(entries) = std::fs::read_dir(compatdata_root) else {
+        return Ok(false);
+    };
+
+    for entry in entries.flatten() {
+        let donor_pfx = entry.path().join("pfx");
+        if donor_pfx == target.prefix_dir() {
+            continue;
+        }
+        let donor_sys32 = donor_pfx.join("drive_c/windows/system32/mscoree.dll");
+        if !donor_sys32.is_file() || is_wine_builtin_dll(&donor_sys32) {
+            continue;
+        }
+
+        let our_sys32 = target
+            .prefix_dir()
+            .join("drive_c/windows/system32/mscoree.dll");
+        std::fs::copy(&donor_sys32, &our_sys32).with_context(|| {
+            format!("copying {} -> {}", donor_sys32.display(), our_sys32.display())
+        })?;
+        crate::applog::log(&format!(
+            "repair_mscoree_from_sibling_prefix: copied {} -> {}",
+            donor_sys32.display(),
+            our_sys32.display()
+        ));
+
+        let donor_syswow64 = donor_pfx.join("drive_c/windows/syswow64/mscoree.dll");
+        if donor_syswow64.is_file() {
+            let our_syswow64 = target
+                .prefix_dir()
+                .join("drive_c/windows/syswow64/mscoree.dll");
+            std::fs::copy(&donor_syswow64, &our_syswow64).with_context(|| {
+                format!(
+                    "copying {} -> {}",
+                    donor_syswow64.display(),
+                    our_syswow64.display()
+                )
+            })?;
+            crate::applog::log(&format!(
+                "repair_mscoree_from_sibling_prefix: copied {} -> {}",
+                donor_syswow64.display(),
+                our_syswow64.display()
+            ));
+        }
+        return Ok(true);
+    }
+
+    crate::applog::log(
+        "repair_mscoree_from_sibling_prefix: no sibling prefix had a usable mscoree.dll",
+    );
+    Ok(false)
 }
 
 /// Kill every running trainer: their unpacked TrainerCacheData helper

@@ -489,6 +489,24 @@ fn run_automatic_setup(target: LaunchTarget, trainer: Trainer, toast_overlay: To
                     setup::run_system_setup()?;
                 }
                 setup::install_dotnet48(&target.prefix_dir())?;
+
+                // winetricks can report success while still leaving Wine's
+                // non-functional builtin mscoree.dll in place (observed on
+                // Wine's new wow64 mode — see repair_mscoree_from_sibling_prefix).
+                // Confirm the install actually took, and fall back to
+                // borrowing a working copy from another prefix if not.
+                if !launcher::has_dotnet40(&target) {
+                    if !launcher::repair_mscoree_from_sibling_prefix(&target)?
+                        || !launcher::has_dotnet40(&target)
+                    {
+                        anyhow::bail!(
+                            "The .NET installer ran but didn't complete successfully, and no \
+                             other game's Proton prefix on this system had a working copy to \
+                             borrow. Try again, or check /var/log/proton-trainer.log."
+                        );
+                    }
+                }
+
                 Ok(target)
             })
             .await

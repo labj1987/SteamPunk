@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.1.12 — 2026-08-05
+
+- Fixed trainers that never open at all against certain games — spawned,
+  then exited immediately (Wine `STATUS_DLL_NOT_FOUND` / exit 53), even
+  though `has_dotnet40`'s clr.dll check passed. Root cause, found via a
+  manual `WINEDEBUG=+file,+seh` trace: `has_dotnet40` only checked for
+  clr.dll, but trainers import `mscoree.dll` directly, and a prefix can end
+  up with Wine's own non-functional builtin `mscoree.dll` still physically
+  in `system32`/`syswow64` even when the `native` DLL override is set
+  correctly — clr.dll alone doesn't catch this. `has_dotnet40` now also
+  verifies `mscoree.dll` isn't Wine's builtin placeholder.
+- The one-time .NET setup no longer silently no-ops on a prefix it's meant
+  to repair: `winetricks dotnet48` now runs with `-f`, since winetricks
+  marks a verb done in `winetricks.log` on first attempt regardless of
+  whether it actually succeeded. If the installer still doesn't produce a
+  working `mscoree.dll` afterward (observed on Wine's new wow64 mode: its
+  own NGEN helper process needs a working `mscoree.dll` just to start, so
+  it can crash before ever writing a real one), setup now falls back to
+  copying a working `mscoree.dll` from another Proton prefix on the same
+  system — mscoree.dll is a thin, largely version-generic redirector, and
+  the actual versioned CLR implementation it hands off to installs
+  correctly regardless.
+
 ## 0.1.11 — 2026-08-05
 
 - The debug log now records the prefix's drive-letter mappings
