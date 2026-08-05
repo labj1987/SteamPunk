@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.2.0 — 2026-08-05
+
+proton-trainer is now SteamPunk. This is a pure rebrand of the earlier
+0.1.x releases — application ID, package name, desktop file, icon, and
+every other user-facing name changed, but none of the actual
+launch/dotnet-repair logic did. Existing users' imported trainers and
+logs are migrated automatically from `~/.local/share/proton-trainer` to
+`~/.local/share/steampunk` the first time the new build runs.
+
+- Trainer list rows now show the game's name and Steam library cover art
+  instead of the raw trainer filename/version string, for any trainer
+  associated with a Steam AppID. Associating one is optional — the app
+  asks for it right after importing a trainer (skip it, or leave it
+  blank, and nothing changes) — and the name/art are fetched once from
+  Steam's public API and CDN and cached locally, never re-fetched on
+  later launches. Trainers without an AppID, including everything
+  imported before this release, keep exactly the previous filename-only
+  display.
+  - This required adding an optional per-trainer AppID association,
+    which reverses the earlier "no per-game association" design
+    decision from 0.1.0 — reliable cover art isn't possible from a
+    filename alone. It's additive and fully optional, not a breaking
+    change.
+
 ## 0.1.14 — 2026-08-05
 
 - With more than one game running, the app now asks which one the trainer is
