@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.14 — 2026-08-05
+
+- With more than one game running, the app now asks which one the trainer is
+  for instead of picking whichever the system happened to list first. Since
+  trainers are game-specific, guessing wrong meant attaching to the wrong
+  game's prefix — which fails in confusing ways rather than visibly. Games are
+  listed by name, read from their Steam appmanifest. With a single game running
+  nothing changes; there's no extra prompt.
+- The troubleshoot dialog disambiguates the same way, so it can no longer list
+  stale trainer logs from a different game than the one you meant.
+
 ## 0.1.13 — 2026-08-05
 
 - Fixed trainers that open but never attach — the window appears with an empty

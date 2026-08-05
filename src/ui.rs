@@ -336,6 +336,94 @@ pub fn build_ui(app: &Application) {
 //  Launch button wiring
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Work out which running game to act on and hand the resolved target to
+/// `proceed`. When exactly one game is running it's used directly; when
+/// several are, the user picks. Shared by the launch and troubleshoot paths so
+/// both disambiguate the same way instead of silently taking whichever game
+/// /proc happened to list first.
+fn with_launch_target(
+    window: &ApplicationWindow,
+    toast_overlay: &ToastOverlay,
+    proceed: Rc<dyn Fn(LaunchTarget)>,
+) {
+    let window = window.clone();
+    let toast_overlay = toast_overlay.clone();
+
+    spawn_async(
+        async { tokio::task::spawn_blocking(launcher::running_games).await },
+        move |result| {
+            let games = match result {
+                Ok(games) => games,
+                Err(e) => {
+                    toast_overlay.add_toast(Toast::new(&format!("Task error: {e}")));
+                    return;
+                }
+            };
+
+            match games.len() {
+                0 => toast_overlay.add_toast(Toast::new(
+                    "Start the game first, load past the menus, then launch the trainer.",
+                )),
+                1 => resolve_target_then(games[0].appid, &toast_overlay, proceed),
+                _ => show_game_picker(&window, games, &toast_overlay, proceed),
+            }
+        },
+    );
+}
+
+fn resolve_target_then(
+    appid: u32,
+    toast_overlay: &ToastOverlay,
+    proceed: Rc<dyn Fn(LaunchTarget)>,
+) {
+    let toast_overlay = toast_overlay.clone();
+    spawn_async(
+        async move {
+            tokio::task::spawn_blocking(move || launcher::resolve_launch_target(appid)).await
+        },
+        move |result| match result {
+            Ok(Ok(target)) => proceed(target),
+            Ok(Err(e)) => toast_overlay.add_toast(Toast::new(&e.to_string())),
+            Err(e) => toast_overlay.add_toast(Toast::new(&format!("Task error: {e}"))),
+        },
+    );
+}
+
+/// One response button per running game. Trainers are game-specific, so
+/// guessing here would attach to the wrong game's prefix rather than fail
+/// visibly — worth an extra click in the rare case two games are open.
+fn show_game_picker(
+    window: &ApplicationWindow,
+    games: Vec<launcher::RunningGame>,
+    toast_overlay: &ToastOverlay,
+    proceed: Rc<dyn Fn(LaunchTarget)>,
+) {
+    let dialog = AlertDialog::builder()
+        .heading("Which Game?")
+        .body("More than one game is running. Pick the one this trainer is for.")
+        .build();
+
+    for (i, game) in games.iter().enumerate() {
+        dialog.add_response(&i.to_string(), &game.name);
+    }
+    dialog.add_response("cancel", "Cancel");
+    dialog.set_close_response("cancel");
+
+    let toast_overlay = toast_overlay.clone();
+    dialog.connect_response(None, move |_dialog, response| {
+        // "cancel" simply fails to parse as an index, which is the intent.
+        let Ok(index) = response.parse::<usize>() else {
+            return;
+        };
+        let Some(game) = games.get(index) else {
+            return;
+        };
+        resolve_target_then(game.appid, &toast_overlay, proceed.clone());
+    });
+
+    dialog.present(Some(window));
+}
+
 fn wire_launch_button(
     btn: &Button,
     trainer: Trainer,
@@ -347,28 +435,20 @@ fn wire_launch_button(
         let window = window.clone();
         let toast_overlay = toast_overlay.clone();
 
-        spawn_async(
-            async { tokio::task::spawn_blocking(launcher::resolve_launch_target).await },
-            move |result| {
-                let target = match result {
-                    Ok(Ok(t)) => t,
-                    Ok(Err(e)) => {
-                        toast_overlay.add_toast(Toast::new(&e.to_string()));
-                        return;
-                    }
-                    Err(e) => {
-                        toast_overlay.add_toast(Toast::new(&format!("Task error: {e}")));
-                        return;
-                    }
-                };
-
+        let dialog_window = window.clone();
+        let dialog_toasts = toast_overlay.clone();
+        with_launch_target(
+            &window,
+            &toast_overlay,
+            Rc::new(move |target| {
+                let trainer = trainer.clone();
+                let toasts = dialog_toasts.clone();
                 if !launcher::has_usable_dotnet(&target) {
-                    show_dotnet_dialog(&window, target, trainer, toast_overlay);
+                    show_dotnet_dialog(&dialog_window, target, trainer, toasts);
                     return;
                 }
-
-                launch_trainer_now(target, trainer, toast_overlay);
-            },
+                launch_trainer_now(target, trainer, toasts);
+            }),
         );
     });
 }
@@ -535,20 +615,14 @@ fn show_troubleshoot(window: &ApplicationWindow, toast_overlay: &ToastOverlay) {
     let window = window.clone();
     let toast_overlay = toast_overlay.clone();
 
-    spawn_async(
-        async { tokio::task::spawn_blocking(launcher::resolve_launch_target).await },
-        move |result| {
-            let target = match result {
-                Ok(Ok(t)) => t,
-                Ok(Err(e)) => {
-                    toast_overlay.add_toast(Toast::new(&e.to_string()));
-                    return;
-                }
-                Err(e) => {
-                    toast_overlay.add_toast(Toast::new(&format!("Task error: {e}")));
-                    return;
-                }
-            };
+    let picker_window = window.clone();
+    let picker_toasts = toast_overlay.clone();
+    with_launch_target(
+        &picker_window,
+        &picker_toasts,
+        Rc::new(move |target| {
+            let window = window.clone();
+            let toast_overlay = toast_overlay.clone();
 
             let dirs = launcher::trainer_log_dirs(&target);
             if dirs.is_empty() {
@@ -616,6 +690,6 @@ fn show_troubleshoot(window: &ApplicationWindow, toast_overlay: &ToastOverlay) {
             let scroll = ScrolledWindow::builder().vexpand(true).child(&outer).build();
             dialog.set_child(Some(&scroll));
             dialog.present(Some(&window));
-        },
+        }),
     );
 }

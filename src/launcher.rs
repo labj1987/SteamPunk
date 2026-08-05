@@ -16,11 +16,23 @@ impl LaunchTarget {
     }
 }
 
-/// Scan /proc for a `SteamLaunch AppId=<N>` cmdline — whatever Proton game
-/// is running is the target, there is no picker.
-pub fn find_running_appid() -> Option<u32> {
+/// A Proton game currently running, for disambiguating when several are open.
+pub struct RunningGame {
+    pub appid: u32,
+    pub name: String,
+}
+
+/// Scan /proc for `SteamLaunch AppId=<N>` cmdlines. Every AppId found is
+/// returned, not just the first: several processes in one game's tree carry
+/// the same marker (wrapper shell, reaper, pressure-vessel), so results are
+/// deduplicated, and they're sorted so the answer doesn't depend on /proc
+/// iteration order the way picking "whichever turns up first" did.
+pub fn find_running_appids() -> Vec<u32> {
     let self_pid = std::process::id();
-    let entries = std::fs::read_dir("/proc").ok()?;
+    let mut found: Vec<u32> = Vec::new();
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return found;
+    };
 
     for entry in entries.flatten() {
         let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
@@ -38,18 +50,52 @@ pub fn find_running_appid() -> Option<u32> {
             .filter_map(|s| std::str::from_utf8(s).ok())
             .collect();
 
-        if !args.iter().any(|a| *a == "SteamLaunch") {
-            continue;
-        }
-        for a in &args {
-            if let Some(id) = a.strip_prefix("AppId=") {
-                if let Ok(appid) = id.parse::<u32>() {
-                    return Some(appid);
-                }
+        if let Some(appid) = appid_from_cmdline(&args) {
+            if !found.contains(&appid) {
+                found.push(appid);
             }
         }
     }
-    None
+    found.sort_unstable();
+    found
+}
+
+/// The AppId a process belongs to, if its cmdline is a Steam game launch.
+/// Both markers are required: `AppId=` alone shows up in unrelated command
+/// lines (this app's own tooling included), and `SteamLaunch` is what makes it
+/// a game rather than a mention.
+fn appid_from_cmdline(args: &[&str]) -> Option<u32> {
+    if !args.iter().any(|a| *a == "SteamLaunch") {
+        return None;
+    }
+    args.iter()
+        .find_map(|a| a.strip_prefix("AppId=")?.parse::<u32>().ok())
+}
+
+/// Running games with display names resolved from their Steam appmanifests.
+pub fn running_games() -> Vec<RunningGame> {
+    let libraries = steam::steam_client_dir()
+        .map(|dir| steam::library_folders(&dir))
+        .unwrap_or_default();
+
+    let games: Vec<RunningGame> = find_running_appids()
+        .into_iter()
+        .map(|appid| RunningGame {
+            name: steam::game_name(&libraries, &appid.to_string())
+                .unwrap_or_else(|| format!("AppId {appid}")),
+            appid,
+        })
+        .collect();
+
+    crate::applog::log(&format!(
+        "running_games -> [{}]",
+        games
+            .iter()
+            .map(|g| format!("{} ({})", g.name, g.appid))
+            .collect::<Vec<_>>()
+            .join(", ")
+    ));
+    games
 }
 
 /// Resolve `<proton_dir>` from the currently running wineserver whose
@@ -140,14 +186,12 @@ fn find_proton_dir(compatdata_dir: &Path) -> Option<PathBuf> {
         .or_else(|| find_proton_dir_from_config_info(compatdata_dir))
 }
 
-/// Resolve everything needed to launch: the running game, its compatdata,
-/// and the Proton build whose wineserver it's actually using.
-pub fn resolve_launch_target() -> Result<LaunchTarget> {
-    let found_appid = find_running_appid();
-    crate::applog::log(&format!("resolve_launch_target: find_running_appid -> {found_appid:?}"));
-    let appid = found_appid.ok_or_else(|| {
-        anyhow!("Start the game first, load past the menus, then launch the trainer.")
-    })?;
+/// Resolve everything needed to launch against a specific running game: its
+/// compatdata and the Proton build whose wineserver it's actually using. The
+/// AppId is passed in rather than discovered here, so that choosing between
+/// several running games stays a decision the caller makes explicitly.
+pub fn resolve_launch_target(appid: u32) -> Result<LaunchTarget> {
+    crate::applog::log(&format!("resolve_launch_target: AppId {appid}"));
 
     let client_dir = steam::steam_client_dir();
     crate::applog::log(&format!("resolve_launch_target: steam_client_dir -> {client_dir:?}"));
@@ -663,6 +707,26 @@ mod tests {
     fn release_is_read_from_the_v4_full_key() {
         assert_eq!(parse_dotnet_release(SAMPLE), Some(0x00080eb1));
         assert!(parse_dotnet_release(SAMPLE).is_some_and(|r| r >= DOTNET_462_RELEASE));
+    }
+
+    #[test]
+    fn appid_is_read_from_a_steam_game_cmdline() {
+        let args = ["reaper", "SteamLaunch", "AppId=1547000", "--", "proton"];
+        assert_eq!(appid_from_cmdline(&args), Some(1547000));
+    }
+
+    #[test]
+    fn appid_requires_the_steamlaunch_marker() {
+        // A bare "AppId=" turns up in command lines that aren't a running game
+        // — matching those would target a prefix for a game that isn't open.
+        let args = ["grep", "AppId=1547000"];
+        assert_eq!(appid_from_cmdline(&args), None);
+    }
+
+    #[test]
+    fn non_numeric_appid_is_ignored() {
+        let args = ["reaper", "SteamLaunch", "AppId=notanumber"];
+        assert_eq!(appid_from_cmdline(&args), None);
     }
 
     #[test]

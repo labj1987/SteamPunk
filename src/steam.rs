@@ -49,6 +49,29 @@ fn quoted_fields(line: &str) -> Vec<&str> {
     line.split('"').skip(1).step_by(2).collect()
 }
 
+/// The game's display name from its appmanifest, used to tell several running
+/// games apart. Returns None if no library has a manifest for this AppId, in
+/// which case callers fall back to showing the bare number.
+pub fn game_name(libraries: &[PathBuf], appid: &str) -> Option<String> {
+    for lib in libraries {
+        let manifest = lib
+            .join("steamapps")
+            .join(format!("appmanifest_{appid}.acf"));
+        let Ok(contents) = std::fs::read_to_string(&manifest) else {
+            continue;
+        };
+        for line in contents.lines() {
+            let fields = quoted_fields(line);
+            if fields.first() == Some(&"name") {
+                if let Some(name) = fields.get(1) {
+                    return Some((*name).to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
 /// The first library whose steamapps/compatdata contains this AppId.
 pub fn compatdata_dir(libraries: &[PathBuf], appid: &str) -> Option<PathBuf> {
     libraries
