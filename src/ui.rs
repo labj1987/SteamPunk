@@ -1,12 +1,13 @@
 use crate::applog;
+use crate::gamedata;
 use crate::launcher::{self, LaunchTarget};
 use crate::library::{self, Trainer};
 use crate::setup;
 
 use gtk4::prelude::*;
 use gtk4::{
-    Align, Box as GtkBox, Button, DropTarget, FileDialog, FileFilter, Label, ListBox, Orientation,
-    ScrolledWindow, SelectionMode, Stack,
+    Align, Box as GtkBox, Button, ContentFit, DropTarget, Entry, FileDialog, FileFilter, Label,
+    ListBox, Orientation, Picture, ScrolledWindow, SelectionMode, Stack,
 };
 use libadwaita::prelude::*;
 use libadwaita::{
@@ -46,7 +47,7 @@ where
 pub fn build_ui(app: &Application) {
     let window = ApplicationWindow::builder()
         .application(app)
-        .title("Proton Trainer")
+        .title("SteamPunk")
         .default_width(480)
         .default_height(560)
         .build();
@@ -137,7 +138,24 @@ pub fn build_ui(app: &Application) {
             stack.set_visible_child_name("list");
 
             for trainer in trainers {
-                let row = ActionRow::builder().title(&trainer.name).build();
+                let row = ActionRow::builder().title(trainer.display_name()).build();
+                // Only trainers with a resolved game name get the filename
+                // as a subtitle — trainers with no AppID keep exactly
+                // today's single-line display.
+                if trainer.game_name.is_some() {
+                    row.set_subtitle(&trainer.name);
+                }
+                if let Some(appid) = trainer.appid {
+                    row.set_tooltip_text(Some(&format!("Steam AppID {appid}")));
+                }
+                if let Some(cover_path) = &trainer.cover_path {
+                    let picture = Picture::for_filename(cover_path);
+                    picture.set_content_fit(ContentFit::Cover);
+                    picture.set_size_request(80, 45);
+                    picture.set_valign(Align::Center);
+                    picture.add_css_class("card");
+                    row.add_prefix(&picture);
+                }
 
                 let launch_btn = Button::builder()
                     .label("Launch")
@@ -198,15 +216,16 @@ pub fn build_ui(app: &Application) {
 
             let refresh_list = refresh_list.clone();
             let toast_overlay = toast_overlay.clone();
+            let window2 = window.clone();
             dialog.open(Some(&window), gio::Cancellable::NONE, move |result| {
                 let Ok(file) = result else { return };
                 let Some(path) = file.path() else { return };
                 let result = library::import_trainer(&path);
                 applog::log(&format!("UI: import_trainer({}) -> {result:?}", path.display()));
                 match result {
-                    Ok(_) => {
-                        refresh_list();
-                        toast_overlay.add_toast(Toast::new("Trainer imported"));
+                    Ok(dest) => {
+                        let queue = Rc::new(RefCell::new(vec![dest]));
+                        prompt_appid_for_queue(window2.clone(), queue, refresh_list.clone(), toast_overlay.clone());
                     }
                     Err(e) => toast_overlay.add_toast(Toast::new(&format!("Import failed: {e}"))),
                 }
@@ -219,13 +238,14 @@ pub fn build_ui(app: &Application) {
     // ─────────────────────────────────────────────────────────────────────────
     {
         let drop_target = DropTarget::new(gdk4::FileList::static_type(), gdk4::DragAction::COPY);
+        let window = window.clone();
         let refresh_list = refresh_list.clone();
         let toast_overlay = toast_overlay.clone();
         drop_target.connect_drop(move |_, value, _, _| {
             let Ok(file_list) = value.get::<gdk4::FileList>() else {
                 return false;
             };
-            let mut imported_any = false;
+            let mut imported: Vec<std::path::PathBuf> = Vec::new();
             for file in file_list.files() {
                 let Some(path) = file.path() else { continue };
                 let is_exe = path
@@ -237,13 +257,14 @@ pub fn build_ui(app: &Application) {
                     continue;
                 }
                 match library::import_trainer(&path) {
-                    Ok(_) => imported_any = true,
+                    Ok(dest) => imported.push(dest),
                     Err(e) => toast_overlay.add_toast(Toast::new(&format!("Import failed: {e}"))),
                 }
             }
+            let imported_any = !imported.is_empty();
             if imported_any {
-                refresh_list();
-                toast_overlay.add_toast(Toast::new("Trainer imported"));
+                let queue = Rc::new(RefCell::new(imported));
+                prompt_appid_for_queue(window.clone(), queue, refresh_list.clone(), toast_overlay.clone());
             }
             imported_any
         });
@@ -291,7 +312,7 @@ pub fn build_ui(app: &Application) {
         let window = window.clone();
         about_btn.connect_clicked(move |_| {
             let dialog = AboutDialog::builder()
-                .application_name("Proton Trainer")
+                .application_name("SteamPunk")
                 .version(env!("CARGO_PKG_VERSION"))
                 .developers(vec!["Linnard Alex Brown Jr."])
                 .comments(
@@ -314,7 +335,7 @@ pub fn build_ui(app: &Application) {
         save_log_btn.connect_clicked(move |_| {
             let dialog = FileDialog::builder()
                 .title("Save Debug Log")
-                .initial_name(format!("proton-trainer-log-{}.txt", applog::filename_timestamp()))
+                .initial_name(format!("steampunk-log-{}.txt", applog::filename_timestamp()))
                 .build();
 
             let toast_overlay = toast_overlay.clone();
@@ -330,6 +351,101 @@ pub fn build_ui(app: &Application) {
     }
 
     window.present();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Optional AppID prompt — shown once per just-imported trainer, right
+//  after import. Purely additive: skipping (or entering nothing) leaves the
+//  trainer exactly as it was before this feature existed — filename title,
+//  no art. Drives itself through `queue` one file at a time so a
+//  multi-file drop prompts for each in turn instead of only the first.
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn prompt_appid_for_queue(
+    window: ApplicationWindow,
+    queue: Rc<RefCell<Vec<std::path::PathBuf>>>,
+    refresh_list: Rc<dyn Fn()>,
+    toast_overlay: ToastOverlay,
+) {
+    let Some(trainer_path) = queue.borrow_mut().pop() else {
+        refresh_list();
+        toast_overlay.add_toast(Toast::new("Trainer imported"));
+        return;
+    };
+    let Some(filename) = trainer_path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+    else {
+        // No filename to key metadata by — skip straight to the next.
+        prompt_appid_for_queue(window, queue, refresh_list, toast_overlay);
+        return;
+    };
+
+    let body = "Optionally enter this game's Steam AppID to show its name and \
+                cover art in the list instead of the raw trainer filename. \
+                Leave blank to skip — the trainer still works either way.";
+
+    let entry = Entry::new();
+    entry.set_placeholder_text(Some("Steam AppID, e.g. 271590"));
+    entry.set_margin_top(6);
+    entry.set_margin_bottom(6);
+    entry.set_margin_start(12);
+    entry.set_margin_end(12);
+
+    let dialog = AlertDialog::builder()
+        .heading(format!("Add Steam AppID for \u{201c}{filename}\u{201d}?"))
+        .body(body)
+        .extra_child(&entry)
+        .build();
+    dialog.add_responses(&[("skip", "Skip"), ("add", "Add")]);
+    dialog.set_response_appearance("add", ResponseAppearance::Suggested);
+    dialog.set_default_response(Some("add"));
+    dialog.set_close_response("skip");
+
+    let present_window = window.clone();
+    dialog.connect_response(None, move |_dialog, response| {
+        if response == "add" {
+            let text = entry.text();
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                match trimmed.parse::<u32>() {
+                    Ok(appid) => match library::set_trainer_appid(&filename, appid) {
+                        Ok(()) => {
+                            let refresh_list2 = refresh_list.clone();
+                            spawn_async(gamedata::fetch_and_cache(appid), move |result| {
+                                if let Err(e) = result {
+                                    applog::log(&format!(
+                                        "gamedata: fetch failed for AppID {appid}: {e}"
+                                    ));
+                                }
+                                // Refresh either way — success shows the new
+                                // art, failure leaves the filename title,
+                                // matching the "don't block adding" rule.
+                                refresh_list2();
+                            });
+                        }
+                        Err(e) => {
+                            toast_overlay.add_toast(Toast::new(&format!(
+                                "Could not save AppID: {e}"
+                            )));
+                        }
+                    },
+                    Err(_) => {
+                        toast_overlay
+                            .add_toast(Toast::new("That doesn't look like a numeric AppID — skipped"));
+                    }
+                }
+            }
+        }
+        prompt_appid_for_queue(
+            window.clone(),
+            queue.clone(),
+            refresh_list.clone(),
+            toast_overlay.clone(),
+        );
+    });
+
+    dialog.present(Some(&present_window));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -558,7 +674,7 @@ will run. This will ask for your password once, then take a minute or two.";
 /// winetricks install) off the main thread, then auto-launches the trainer
 /// on success. Errors from either phase surface via a toast with the real
 /// error message; the setup script and install_dotnet48 both also log to
-/// /var/log/proton-trainer.log.
+/// /var/log/steampunk.log.
 fn run_automatic_setup(target: LaunchTarget, trainer: Trainer, toast_overlay: ToastOverlay) {
     toast_overlay.add_toast(Toast::new("Setting up .NET — this may take a minute or two…"));
 

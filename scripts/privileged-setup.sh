@@ -5,9 +5,9 @@
 
 set -uo pipefail
 
-LOGFILE="/var/log/proton-trainer.log"
+LOGFILE="/var/log/steampunk.log"
 log() {
-    local msg="[proton-trainer] $*"
+    local msg="[steampunk] $*"
     echo "$msg"
     echo "$(date '+%Y-%m-%d %H:%M:%S') $msg" >> "$LOGFILE" 2>/dev/null || true
 }

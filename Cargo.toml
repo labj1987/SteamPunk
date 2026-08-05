@@ -1,12 +1,12 @@
 [package]
-name = "proton-trainer"
+name = "steampunk"
 version = "0.1.14"
 edition = "2021"
 description = "Launch Windows game trainers through Proton against a running Steam game's wine session"
 authors = ["Alex Brown"]
 
 [[bin]]
-name = "proton-trainer"
+name = "steampunk"
 path = "src/main.rs"
 
 [dependencies]
@@ -17,3 +17,6 @@ gio = "0.20"
 gdk4 = "0.9"
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"
+reqwest = { version = "0.13", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

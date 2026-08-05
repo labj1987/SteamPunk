@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# build-appimage.sh — build the Proton Trainer AppImage.
+# build-appimage.sh — build the SteamPunk AppImage.
 # Run from the repo root on Ubuntu (CI uses ubuntu-latest). Run as root in CI.
 set -euo pipefail
 
-APP="proton-trainer"
+APP="steampunk"
 # Single source of truth: the version in Cargo.toml
 VERSION="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
 ARCH="x86_64"
@@ -43,8 +43,8 @@ cp scripts/privileged-setup.sh                        "$APPDIR/usr/lib/$APP/"
 chmod 755 "$APPDIR/usr/lib/$APP/privileged-setup.sh"
 cp data/$APP.desktop                                  "$APPDIR/usr/share/applications/"
 cp data/$APP.png                                       "$APPDIR/usr/share/icons/hicolor/256x256/apps/"
-cp data/io.github.labj1987.ProtonTrainer.setup.policy  "$APPDIR/usr/share/polkit-1/actions/"
-cp data/io.github.labj1987.ProtonTrainer.appdata.xml   "$APPDIR/usr/share/metainfo/"
+cp data/io.github.labj1987.SteamPunk.setup.policy  "$APPDIR/usr/share/polkit-1/actions/"
+cp data/io.github.labj1987.SteamPunk.appdata.xml   "$APPDIR/usr/share/metainfo/"
 
 # Top-level AppImage requirements
 cp data/$APP.desktop "$APPDIR/"
@@ -58,12 +58,12 @@ cp data/$APP.png     "$APPDIR/"
 cat > "$APPDIR/AppRun" << 'APPRUN'
 #!/usr/bin/env bash
 HERE="$(dirname "$(readlink -f "$0")")"
-APP="proton-trainer"
+APP="steampunk"
 
 SRC_SCRIPT="$HERE/usr/lib/$APP/privileged-setup.sh"
-SRC_POLICY="$HERE/usr/share/polkit-1/actions/io.github.labj1987.ProtonTrainer.setup.policy"
+SRC_POLICY="$HERE/usr/share/polkit-1/actions/io.github.labj1987.SteamPunk.setup.policy"
 DST_SCRIPT="/usr/lib/$APP/privileged-setup.sh"
-DST_POLICY="/usr/share/polkit-1/actions/io.github.labj1987.ProtonTrainer.setup.policy"
+DST_POLICY="/usr/share/polkit-1/actions/io.github.labj1987.SteamPunk.setup.policy"
 
 needs_install=0
 if [[ ! -f "$DST_SCRIPT" ]] || ! cmp -s "$SRC_SCRIPT" "$DST_SCRIPT"; then
@@ -82,7 +82,7 @@ if [[ $needs_install -eq 1 ]]; then
 fi
 
 export PATH="$HERE/usr/bin:$PATH"
-exec "$HERE/usr/bin/proton-trainer" "$@"
+exec "$HERE/usr/bin/steampunk" "$@"
 APPRUN
 chmod 755 "$APPDIR/AppRun"
 
@@ -98,7 +98,9 @@ fi
 echo "==> Packing AppImage"
 OUT="$APP-$VERSION-$ARCH.AppImage"
 
-UPDATE_INFORMATION="gh-releases-zsync|labj1987|proton-trainer|latest|proton-trainer-*-x86_64.AppImage.zsync"
+# Repo field stays "proton-trainer" until/unless the GitHub repo itself is
+# renamed — the update spec resolves releases through the repo name.
+UPDATE_INFORMATION="gh-releases-zsync|labj1987|proton-trainer|latest|steampunk-*-x86_64.AppImage.zsync"
 VERSION="$VERSION" ARCH="$ARCH" "$TOOL" --appimage-extract-and-run \
     -u "$UPDATE_INFORMATION" "$APPDIR" "$OUT"
 

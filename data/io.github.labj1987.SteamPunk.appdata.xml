@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop-application">
-  <id>io.github.labj1987.ProtonTrainer</id>
-  <name>Proton Trainer</name>
+  <id>io.github.labj1987.SteamPunk</id>
+  <name>SteamPunk</name>
   <summary>Launch Windows game trainers through Proton against a running Steam game</summary>
   <metadata_license>MIT</metadata_license>
   <project_license>MIT</project_license>
@@ -14,9 +14,9 @@
       wineserver process, not from potentially stale compatdata metadata.
     </p>
   </description>
-  <launchable type="desktop-id">proton-trainer.desktop</launchable>
+  <launchable type="desktop-id">steampunk.desktop</launchable>
   <provides>
-    <binary>proton-trainer</binary>
+    <binary>steampunk</binary>
   </provides>
   <categories>
     <category>Game</category>

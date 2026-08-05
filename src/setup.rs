@@ -10,8 +10,8 @@ use std::io::Write;
 use std::path::Path;
 use std::process::Command;
 
-const SCRIPT: &str = "/usr/lib/proton-trainer/privileged-setup.sh";
-pub const LOGFILE: &str = "/var/log/proton-trainer.log";
+const SCRIPT: &str = "/usr/lib/steampunk/privileged-setup.sh";
+pub const LOGFILE: &str = "/var/log/steampunk.log";
 
 /// Returns true if the one-time system packages are already present — skip
 /// pkexec entirely if so. Both checks are quick and need no root.
@@ -49,10 +49,7 @@ pub fn run_system_setup() -> Result<()> {
         if code == 126 || code == 127 {
             bail!("Authentication was cancelled.");
         }
-        bail!(
-            "Script exited with code {} (see /var/log/proton-trainer.log)",
-            code
-        );
+        bail!("Script exited with code {} (see {})", code, LOGFILE);
     }
     Ok(())
 }
@@ -112,7 +109,7 @@ fn append_to_log(stdout: &[u8], stderr: &[u8]) {
     else {
         return;
     };
-    let _ = writeln!(f, "[proton-trainer] ==== winetricks dotnet48 output ====");
+    let _ = writeln!(f, "[steampunk] ==== winetricks dotnet48 output ====");
     let _ = f.write_all(stdout);
     let _ = f.write_all(stderr);
 }

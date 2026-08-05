@@ -1,18 +1,106 @@
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug)]
 pub struct Trainer {
-    /// File stem, used as the display name (e.g. "CrimsonDesert_1_13").
+    /// File stem (e.g. "CrimsonDesert_1_13") — the display name when no
+    /// AppID is set, and the secondary/subtitle line when one is (see
+    /// `display_name` and ui.rs).
     pub name: String,
     pub path: PathBuf,
+    /// Optional per-trainer Steam AppID association, set at import time.
+    /// This is new: trainers were originally deliberately unassociated with
+    /// any game (matched to whatever's running only at launch, via
+    /// `find_running_appid`), but reliable cover art requires knowing the
+    /// AppID up front, so this reverses that decision for trainers that
+    /// opt in. Fully optional — see `display_name`.
+    pub appid: Option<u32>,
+    /// Resolved from the Steam Store API and cached locally under
+    /// `data_dir()/cache/`. `None` until a fetch has succeeded (or if no
+    /// AppID is set), in which case the UI falls back to `name`.
+    pub game_name: Option<String>,
+    /// Cached cover-art image path, if a fetch has succeeded.
+    pub cover_path: Option<PathBuf>,
 }
 
-/// `~/.local/share/proton-trainer/trainers/` — where imported trainers live,
-/// flat, no per-game folders or association.
-pub fn trainers_dir() -> Result<PathBuf> {
+impl Trainer {
+    /// The resolved game name if available, else the filename-derived
+    /// title — today's behavior for trainers with no AppID association.
+    pub fn display_name(&self) -> &str {
+        self.game_name.as_deref().unwrap_or(&self.name)
+    }
+}
+
+/// Per-trainer metadata, keyed by filename, persisted as JSON alongside the
+/// trainers themselves. Only holds the AppID association today — the
+/// resolved name/art live in the separate `gamedata` cache, keyed by AppID
+/// instead of filename, since multiple trainers can share one AppID.
+#[derive(Serialize, Deserialize, Default, Clone)]
+struct TrainerMeta {
+    appid: Option<u32>,
+}
+
+fn meta_path() -> Result<PathBuf> {
+    Ok(data_dir()?.join("trainers.json"))
+}
+
+fn load_meta() -> HashMap<String, TrainerMeta> {
+    let Ok(path) = meta_path() else {
+        return HashMap::new();
+    };
+    let Ok(contents) = std::fs::read_to_string(&path) else {
+        return HashMap::new();
+    };
+    serde_json::from_str(&contents).unwrap_or_default()
+}
+
+fn save_meta(meta: &HashMap<String, TrainerMeta>) -> Result<()> {
+    let path = meta_path()?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let json = serde_json::to_string_pretty(meta)?;
+    std::fs::write(&path, json).with_context(|| format!("writing {}", path.display()))
+}
+
+/// Associate a Steam AppID with an already-imported trainer, keyed by its
+/// filename. Overwrites any existing association for that trainer.
+pub fn set_trainer_appid(filename: &str, appid: u32) -> Result<()> {
+    let mut meta = load_meta();
+    meta.insert(
+        filename.to_string(),
+        TrainerMeta {
+            appid: Some(appid),
+        },
+    );
+    save_meta(&meta)
+}
+
+/// `~/.local/share/steampunk/` — the app's data dir (trainers, logs,
+/// trainer metadata, cover-art cache).
+pub fn data_dir() -> Result<PathBuf> {
     let home = std::env::var("HOME").context("HOME not set")?;
-    Ok(PathBuf::from(home).join(".local/share/proton-trainer/trainers"))
+    Ok(PathBuf::from(home).join(".local/share/steampunk"))
+}
+
+/// One-time move of the pre-rename data dir (`~/.local/share/proton-trainer`)
+/// to the new location, so existing imported trainers survive the rebrand.
+/// Must run before anything (applog included) touches the data dir.
+pub fn migrate_legacy_data_dir() {
+    let Ok(new_dir) = data_dir() else { return };
+    let Ok(home) = std::env::var("HOME") else { return };
+    let old_dir = PathBuf::from(home).join(".local/share/proton-trainer");
+    if old_dir.is_dir() && !new_dir.exists() {
+        let _ = std::fs::rename(&old_dir, &new_dir);
+    }
+}
+
+/// `~/.local/share/steampunk/trainers/` — where imported trainers live,
+/// flat, no per-game folders.
+pub fn trainers_dir() -> Result<PathBuf> {
+    Ok(data_dir()?.join("trainers"))
 }
 
 pub fn list_trainers() -> Result<Vec<Trainer>> {
@@ -21,20 +109,45 @@ pub fn list_trainers() -> Result<Vec<Trainer>> {
         return Ok(Vec::new());
     }
 
+    let meta = load_meta();
+
     let mut trainers: Vec<Trainer> = std::fs::read_dir(&dir)?
         .flatten()
         .map(|e| e.path())
         .filter(|p| p.is_file() && p.extension().and_then(|e| e.to_str()) == Some("exe"))
-        .map(|path| Trainer {
-            name: path
+        .map(|path| {
+            let filename = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let name = path
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| path.to_string_lossy().into_owned()),
-            path,
+                .unwrap_or_else(|| path.to_string_lossy().into_owned());
+            let appid = meta.get(&filename).and_then(|m| m.appid);
+            // Cache reads only — no network access here, so this runs on
+            // every list refresh (including app startup) without ever
+            // re-fetching. A cache miss (fetch never ran, or failed) just
+            // means falling back to the filename, matching trainers that
+            // never had an AppID at all.
+            let (game_name, cover_path) = match appid {
+                Some(id) => (
+                    crate::gamedata::cached_name(id),
+                    crate::gamedata::cached_cover(id),
+                ),
+                None => (None, None),
+            };
+            Trainer {
+                name,
+                path,
+                appid,
+                game_name,
+                cover_path,
+            }
         })
         .collect();
 
-    trainers.sort_by(|a, b| a.name.cmp(&b.name));
+    trainers.sort_by(|a, b| a.display_name().cmp(b.display_name()));
     Ok(trainers)
 }
 
@@ -54,6 +167,15 @@ pub fn import_trainer(src: &Path) -> Result<PathBuf> {
 }
 
 pub fn remove_trainer(path: &Path) -> Result<()> {
-    std::fs::remove_file(path)
-        .with_context(|| format!("removing {}", path.display()))
+    std::fs::remove_file(path).with_context(|| format!("removing {}", path.display()))?;
+
+    // Best-effort: drop the AppID association too, so re-adding the same
+    // filename later doesn't inherit a stale one.
+    if let Some(filename) = path.file_name().map(|n| n.to_string_lossy().into_owned()) {
+        let mut meta = load_meta();
+        if meta.remove(&filename).is_some() {
+            let _ = save_meta(&meta);
+        }
+    }
+    Ok(())
 }
