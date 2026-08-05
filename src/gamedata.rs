@@ -102,7 +102,7 @@ async fn fetch_cover(client: &reqwest::Client, appid: u32) -> Result<()> {
     Ok(())
 }
 
-async fn download_image(client: &reqwest::Client, url: &str) -> Result<Vec<u8>> {
+pub(crate) async fn download_image(client: &reqwest::Client, url: &str) -> Result<Vec<u8>> {
     let resp = client
         .get(url)
         .send()
@@ -111,4 +111,162 @@ async fn download_image(client: &reqwest::Client, url: &str) -> Result<Vec<u8>> 
         .error_for_status()
         .with_context(|| format!("{url} returned an error status"))?;
     Ok(resp.bytes().await?.to_vec())
+}
+
+/// Minimal percent-encoding for a query-string value. `reqwest`'s own
+/// `.query()` helper needs the `query` feature, which pulls in
+/// `serde_urlencoded` as a new dependency — not worth it just for one
+/// simple parameter, so this hand-rolls the same RFC 3986 unreserved-char
+/// allowlist instead.
+fn percent_encode(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for byte in input.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*byte as char);
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
+/// One Steam Store search hit, trimmed down to what the AppID picker needs.
+pub struct SearchResult {
+    pub appid: u32,
+    pub name: String,
+    pub thumbnail_url: Option<String>,
+}
+
+/// Caps how many rows the AppID search dropdown shows.
+const MAX_SEARCH_RESULTS: usize = 8;
+
+/// Downloads a search result's thumbnail into memory (no disk cache — the
+/// picker shows results for many candidate games the user won't pick, so
+/// caching them to `cache_dir()` would just accumulate cruft for AppIDs
+/// nobody ends up choosing). Builds its own short-lived client, same as
+/// `fetch_and_cache`'s image fetch, since there's no long-lived client to
+/// share across a UI-triggered one-off call.
+pub async fn fetch_thumbnail(url: &str) -> Result<Vec<u8>> {
+    let client = reqwest::Client::builder()
+        .user_agent("steampunk (https://github.com/labj1987/SteamPunk)")
+        .timeout(Duration::from_secs(10))
+        .build()?;
+    download_image(&client, url).await
+}
+
+/// Live search against Steam's public storesearch API — used by the AppID
+/// picker so the user can find a game by name instead of typing a raw
+/// AppID. A blank/whitespace-only term is treated as "no search yet" rather
+/// than an error, so the picker can call this on every keystroke without
+/// special-casing an empty box.
+pub async fn search(term: &str) -> Result<Vec<SearchResult>> {
+    let term = term.trim();
+    if term.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let client = reqwest::Client::builder()
+        .user_agent("steampunk (https://github.com/labj1987/SteamPunk)")
+        .timeout(Duration::from_secs(10))
+        .build()?;
+
+    let url = format!(
+        "https://store.steampowered.com/api/storesearch/?term={}&cc=us&l=en",
+        percent_encode(term)
+    );
+    let body: serde_json::Value = client
+        .get(&url)
+        .send()
+        .await
+        .with_context(|| format!("requesting storesearch for {term:?}"))?
+        .error_for_status()
+        .with_context(|| format!("storesearch returned an error status for {term:?}"))?
+        .json()
+        .await
+        .context("parsing storesearch response as JSON")?;
+
+    let items = body.get("items").and_then(|v| v.as_array());
+    let Some(items) = items else {
+        return Ok(Vec::new());
+    };
+
+    let results = items
+        .iter()
+        .filter_map(|item| {
+            let appid = item.get("id")?.as_u64()? as u32;
+            let name = item.get("name")?.as_str()?.to_string();
+            let thumbnail_url = item
+                .get("tiny_image")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            Some(SearchResult {
+                appid,
+                name,
+                thumbnail_url,
+            })
+        })
+        .take(MAX_SEARCH_RESULTS)
+        .collect();
+
+    Ok(results)
+}
+
+/// Guesses a Steam search term from a trainer's filename stem, by cutting
+/// the string at the first word that looks like a version token (`v` or `V`
+/// immediately followed by a digit — so a bare `"V"`, as in "Grand Theft
+/// Auto V", is left alone) or that is exactly "plus" (case-insensitive),
+/// which is how trainer filenames introduce their cheat count. Everything
+/// before the cut is joined back together as the guessed title; if nothing
+/// matches, the whole stem is returned unchanged.
+pub fn guess_search_term(filename_stem: &str) -> String {
+    let is_version_token = |word: &str| {
+        let mut chars = word.chars();
+        matches!(chars.next(), Some('v') | Some('V')) && matches!(chars.next(), Some(c) if c.is_ascii_digit())
+    };
+
+    let words: Vec<&str> = filename_stem.split_whitespace().collect();
+    let cut = words
+        .iter()
+        .position(|w| is_version_token(w) || w.eq_ignore_ascii_case("plus"));
+
+    match cut {
+        Some(i) => words[..i].join(" "),
+        None => filename_stem.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::guess_search_term;
+
+    #[test]
+    fn strips_version_and_plus_count() {
+        assert_eq!(
+            guess_search_term("Grand Theft Auto V Enhanced v1.0.811 Plus 22 Trainer"),
+            "Grand Theft Auto V Enhanced"
+        );
+        assert_eq!(
+            guess_search_term("Crimson Desert v1.0-v1.16 Plus 12 Trainer"),
+            "Crimson Desert"
+        );
+        assert_eq!(
+            guess_search_term(
+                "Grand Theft Auto San Andreas The Definitive Edition v1.0-v1.0.8.11827 Plus 49 Trainer"
+            ),
+            "Grand Theft Auto San Andreas The Definitive Edition"
+        );
+    }
+
+    #[test]
+    fn bare_v_is_not_a_version_token() {
+        // "V" with nothing after it (or a non-digit after it) must not
+        // trigger the cut — only Roman-numeral-free digit versions do.
+        assert_eq!(guess_search_term("Grand Theft Auto V"), "Grand Theft Auto V");
+    }
+
+    #[test]
+    fn no_match_returns_whole_stem() {
+        assert_eq!(guess_search_term("Crimson Desert"), "Crimson Desert");
+    }
 }

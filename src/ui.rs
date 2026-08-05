@@ -6,8 +6,8 @@ use crate::setup;
 
 use gtk4::prelude::*;
 use gtk4::{
-    Align, Box as GtkBox, Button, ContentFit, DropTarget, Entry, FileDialog, FileFilter, Label,
-    ListBox, Orientation, Picture, ScrolledWindow, SelectionMode, Stack,
+    Align, Box as GtkBox, Button, ContentFit, DropTarget, FileDialog, FileFilter, Label, ListBox,
+    Orientation, Picture, ScrolledWindow, SearchEntry, SelectionMode, Stack,
 };
 use libadwaita::prelude::*;
 use libadwaita::{
@@ -359,6 +359,14 @@ pub fn build_ui(app: &Application) {
 //  trainer exactly as it was before this feature existed — filename title,
 //  no art. Drives itself through `queue` one file at a time so a
 //  multi-file drop prompts for each in turn instead of only the first.
+//
+//  A custom `libadwaita::Dialog` rather than `AlertDialog`: this version
+//  needs several independent ways to finish (a search-result click, the
+//  manual "Add" button, "Skip"), and `AlertDialog` only supports firing one
+//  of its own named responses. Building it from scratch means every one of
+//  those paths is its own button handler that closes the dialog and
+//  advances the queue exactly once — see `confirm`/`advance` below — so
+//  there's no shared response signal two handlers could both fire.
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn prompt_appid_for_queue(
@@ -380,72 +388,260 @@ fn prompt_appid_for_queue(
         prompt_appid_for_queue(window, queue, refresh_list, toast_overlay);
         return;
     };
+    let stem = trainer_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| filename.clone());
+    let guessed_term = gamedata::guess_search_term(&stem);
 
-    let body = "Optionally enter this game's Steam AppID to show its name and \
-                cover art in the list instead of the raw trainer filename. \
-                Leave blank to skip — the trainer still works either way.";
+    // Moves on to the next queued trainer (or finishes the queue). Every
+    // button/row handler below calls this exactly once, after closing the
+    // dialog itself.
+    let advance: Rc<dyn Fn()> = {
+        let window = window.clone();
+        let queue = queue.clone();
+        let refresh_list = refresh_list.clone();
+        let toast_overlay = toast_overlay.clone();
+        Rc::new(move || {
+            prompt_appid_for_queue(
+                window.clone(),
+                queue.clone(),
+                refresh_list.clone(),
+                toast_overlay.clone(),
+            );
+        })
+    };
 
-    let entry = Entry::new();
-    entry.set_placeholder_text(Some("Steam AppID, e.g. 271590"));
-    entry.set_margin_top(6);
-    entry.set_margin_bottom(6);
-    entry.set_margin_start(12);
-    entry.set_margin_end(12);
-
-    let dialog = AlertDialog::builder()
-        .heading(format!("Add Steam AppID for \u{201c}{filename}\u{201d}?"))
-        .body(body)
-        .extra_child(&entry)
+    let dialog = AdwDialog::builder()
+        .title(format!("Add Steam AppID for \u{201c}{filename}\u{201d}?"))
+        .content_width(420)
+        .content_height(480)
         .build();
-    dialog.add_responses(&[("skip", "Skip"), ("add", "Add")]);
-    dialog.set_response_appearance("add", ResponseAppearance::Suggested);
-    dialog.set_default_response(Some("add"));
-    dialog.set_close_response("skip");
 
-    let present_window = window.clone();
-    dialog.connect_response(None, move |_dialog, response| {
-        if response == "add" {
-            let text = entry.text();
-            let trimmed = text.trim();
-            if !trimmed.is_empty() {
-                match trimmed.parse::<u32>() {
-                    Ok(appid) => match library::set_trainer_appid(&filename, appid) {
-                        Ok(()) => {
-                            let refresh_list2 = refresh_list.clone();
-                            spawn_async(gamedata::fetch_and_cache(appid), move |result| {
-                                if let Err(e) = result {
-                                    applog::log(&format!(
-                                        "gamedata: fetch failed for AppID {appid}: {e}"
-                                    ));
-                                }
-                                // Refresh either way — success shows the new
-                                // art, failure leaves the filename title,
-                                // matching the "don't block adding" rule.
-                                refresh_list2();
-                            });
+    let outer = GtkBox::new(Orientation::Vertical, 8);
+    outer.set_margin_top(12);
+    outer.set_margin_bottom(12);
+    outer.set_margin_start(12);
+    outer.set_margin_end(12);
+
+    let hint = Label::new(Some(
+        "Optionally search for this game to show its name and cover art in \
+         the list instead of the raw trainer filename. Leave blank to skip \
+         — the trainer still works either way.",
+    ));
+    hint.set_wrap(true);
+    hint.set_xalign(0.0);
+    outer.append(&hint);
+
+    let search_entry = SearchEntry::new();
+    search_entry.set_text(&guessed_term);
+    search_entry.set_placeholder_text(Some("Search for a game, or enter a numeric AppID"));
+    outer.append(&search_entry);
+
+    let results_list = ListBox::new();
+    results_list.set_selection_mode(SelectionMode::None);
+    results_list.add_css_class("boxed-list");
+    let results_scroll = ScrolledWindow::builder()
+        .vexpand(true)
+        .child(&results_list)
+        .build();
+    outer.append(&results_scroll);
+
+    let button_row = GtkBox::new(Orientation::Horizontal, 8);
+    button_row.set_halign(Align::End);
+    let skip_btn = Button::builder().label("Skip").build();
+    let add_btn = Button::builder().label("Add").build();
+    add_btn.add_css_class("suggested-action");
+    button_row.append(&skip_btn);
+    button_row.append(&add_btn);
+    outer.append(&button_row);
+
+    dialog.set_child(Some(&outer));
+
+    // Every way of picking an AppID — a search-result row or the manual Add
+    // button — funnels through here exactly once: closes the dialog, saves
+    // the association, kicks off the (fire-and-forget) name/art fetch, and
+    // advances the queue. Fetch failure only logs and still advances —
+    // matches the existing "don't block adding" behavior.
+    let confirm: Rc<dyn Fn(u32)> = {
+        let dialog = dialog.clone();
+        let filename = filename.clone();
+        let refresh_list = refresh_list.clone();
+        let toast_overlay = toast_overlay.clone();
+        let advance = advance.clone();
+        Rc::new(move |appid: u32| {
+            dialog.close();
+            match library::set_trainer_appid(&filename, appid) {
+                Ok(()) => {
+                    let refresh_list2 = refresh_list.clone();
+                    spawn_async(gamedata::fetch_and_cache(appid), move |result| {
+                        if let Err(e) = result {
+                            applog::log(&format!("gamedata: fetch failed for AppID {appid}: {e}"));
                         }
-                        Err(e) => {
-                            toast_overlay.add_toast(Toast::new(&format!(
-                                "Could not save AppID: {e}"
-                            )));
-                        }
-                    },
-                    Err(_) => {
-                        toast_overlay
-                            .add_toast(Toast::new("That doesn't look like a numeric AppID — skipped"));
-                    }
+                        refresh_list2();
+                    });
+                }
+                Err(e) => {
+                    toast_overlay.add_toast(Toast::new(&format!("Could not save AppID: {e}")));
                 }
             }
-        }
-        prompt_appid_for_queue(
-            window.clone(),
-            queue.clone(),
-            refresh_list.clone(),
-            toast_overlay.clone(),
-        );
-    });
+            advance();
+        })
+    };
 
-    dialog.present(Some(&present_window));
+    // Renders one search result as an ActionRow; the thumbnail loads async
+    // and drops in once it arrives (or never, if the fetch fails — the row
+    // is still usable without it).
+    let build_result_row = {
+        let confirm = confirm.clone();
+        move |result: gamedata::SearchResult| -> ActionRow {
+            let row = ActionRow::builder()
+                .title(result.name.clone())
+                .subtitle(format!("AppID {}", result.appid))
+                .activatable(true)
+                .build();
+
+            if let Some(url) = result.thumbnail_url.clone() {
+                let picture = Picture::new();
+                picture.set_content_fit(ContentFit::Cover);
+                picture.set_size_request(60, 34);
+                picture.set_valign(Align::Center);
+                picture.add_css_class("card");
+                row.add_prefix(&picture);
+                spawn_async(async move { gamedata::fetch_thumbnail(&url).await }, move |bytes| {
+                    let Ok(bytes) = bytes else { return };
+                    let gbytes = glib::Bytes::from(&bytes);
+                    if let Ok(texture) = gdk4::Texture::from_bytes(&gbytes) {
+                        picture.set_paintable(Some(&texture));
+                    }
+                });
+            }
+
+            let use_btn = Button::builder().label("Use").valign(Align::Center).build();
+            {
+                let confirm = confirm.clone();
+                let appid = result.appid;
+                use_btn.connect_clicked(move |_| confirm(appid));
+            }
+            row.add_suffix(&use_btn);
+
+            {
+                let confirm = confirm.clone();
+                let appid = result.appid;
+                row.connect_activated(move |_| confirm(appid));
+            }
+
+            row
+        }
+    };
+
+    // Tracks the current top result's AppID so Enter can pick it — kept
+    // separate from `results_list` itself since digging the first row's
+    // AppID back out of the widget tree on every keypress would mean
+    // stashing it as widget data anyway; a plain slot is simpler.
+    let top_result: Rc<RefCell<Option<u32>>> = Rc::new(RefCell::new(None));
+
+    // Fires a search, guarded against out-of-order replies to fast typing:
+    // a result set is only applied if the entry's text still matches the
+    // term that produced it by the time the network call returns.
+    let run_search: Rc<dyn Fn(String)> = {
+        let search_entry = search_entry.clone();
+        let results_list = results_list.clone();
+        let build_result_row = build_result_row.clone();
+        let top_result = top_result.clone();
+        Rc::new(move |term: String| {
+            let search_entry = search_entry.clone();
+            let results_list = results_list.clone();
+            let build_result_row = build_result_row.clone();
+            let top_result = top_result.clone();
+            let term_for_check = term.clone();
+            spawn_async(async move { gamedata::search(&term).await }, move |results| {
+                if search_entry.text().as_str() != term_for_check {
+                    return;
+                }
+                while let Some(c) = results_list.first_child() {
+                    results_list.remove(&c);
+                }
+                match results {
+                    Ok(results) => {
+                        *top_result.borrow_mut() = results.first().map(|r| r.appid);
+                        for result in results {
+                            results_list.append(&build_result_row(result));
+                        }
+                    }
+                    Err(e) => {
+                        *top_result.borrow_mut() = None;
+                        applog::log(&format!(
+                            "gamedata: search failed for {term_for_check:?}: {e}"
+                        ));
+                    }
+                }
+            });
+        })
+    };
+
+    {
+        let run_search = run_search.clone();
+        search_entry.connect_search_changed(move |entry| {
+            run_search(entry.text().to_string());
+        });
+    }
+    {
+        let confirm = confirm.clone();
+        let top_result = top_result.clone();
+        search_entry.connect_activate(move |entry| {
+            let text = entry.text();
+            // A raw numeric AppID takes priority (matches the Add button's
+            // behavior); otherwise Enter picks whatever's currently the top
+            // search result, if any.
+            if let Ok(appid) = text.trim().parse::<u32>() {
+                confirm(appid);
+            } else if let Some(appid) = *top_result.borrow() {
+                confirm(appid);
+            }
+        });
+    }
+
+    // Fire the initial search immediately with the guessed term, so results
+    // are already present when the dialog opens.
+    run_search(guessed_term.clone());
+
+    {
+        let dialog = dialog.clone();
+        let advance = advance.clone();
+        skip_btn.connect_clicked(move |_| {
+            dialog.close();
+            advance();
+        });
+    }
+    {
+        let search_entry = search_entry.clone();
+        let confirm = confirm.clone();
+        let dialog = dialog.clone();
+        let advance = advance.clone();
+        let toast_overlay = toast_overlay.clone();
+        add_btn.connect_clicked(move |_| {
+            let text = search_entry.text();
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                dialog.close();
+                advance();
+                return;
+            }
+            match trimmed.parse::<u32>() {
+                Ok(appid) => confirm(appid),
+                Err(_) => {
+                    toast_overlay.add_toast(Toast::new(
+                        "That doesn't look like a numeric AppID — skipped",
+                    ));
+                    dialog.close();
+                    advance();
+                }
+            }
+        });
+    }
+
+    dialog.present(Some(&window));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
