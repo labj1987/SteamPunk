@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.4.3 — 2026-08-12
+
+- Actually fixed the trainer list compressing instead of scrolling this
+  time — 0.4.2's fix didn't hold up under real testing. Root cause,
+  confirmed by screenshotting a real build under X11: without an explicit
+  `max-content-height` on the list's `ScrolledWindow`, it tries to grow to
+  fit *all* content before ever committing to scrolling, so on first
+  launch or a large/maximized window, whatever doesn't fit gets silently
+  clipped instead of scrolled. Capped it so the list always commits to
+  scrolling past a fixed height, verified with up to 28 trainers in a
+  maximized window.
+- Fixed trainer/game titles containing `&` (e.g. "Mount & Blade II:
+  Bannerlord") rendering as a blank row — row titles are parsed as Pango
+  markup, not plain text, and an unescaped `&` breaks that parsing
+  silently. Escaped everywhere a resolved game name, trainer filename, or
+  Steam search result can reach a title/subtitle.
+
 ## 0.4.2 — 2026-08-12
 
 - Fixed trainer rows getting squeezed smaller instead of scrolling as more

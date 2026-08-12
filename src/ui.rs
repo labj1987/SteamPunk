@@ -23,6 +23,15 @@ use std::rc::Rc;
 //  back on the GTK main thread.
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ActionRow/AdwDialog titles and subtitles are interpreted as Pango markup,
+// not plain text — an unescaped `&` (e.g. in "Mount & Blade II: Bannerlord")
+// breaks parsing and the label silently renders blank. Escape any string
+// that didn't originate as a literal in this file before handing it to a
+// title/subtitle/heading setter.
+fn esc(s: &str) -> String {
+    glib::markup_escape_text(s).to_string()
+}
+
 fn spawn_async<F, T, CB>(future: F, callback: CB)
 where
     F: std::future::Future<Output = T> + Send + 'static,
@@ -90,11 +99,11 @@ pub fn build_ui(app: &Application) {
 
     // ── Stack: empty status page <-> trainer list ───────────────────────────
     let stack = Stack::new();
-    // Without this, Stack's default vhomogeneous=true couples the "list"
-    // page's height request to the "empty" page's (and vice versa) even
-    // though only one is ever visible — on a tall/maximized window that let
-    // the trainer list's rows get squeezed to fit rather than letting the
-    // ScrolledWindow scroll past them.
+    // Defensive: without this, Stack's default vhomogeneous=true couples
+    // the "list" page's height request to the "empty" page's, even though
+    // only one is ever visible. Not the fix for the list-compresses-instead-
+    // of-scrolling bug (see max_content_height below for that), but no
+    // reason to leave the coupling in place either.
     stack.set_vhomogeneous(false);
 
     let status_page = StatusPage::builder()
@@ -111,13 +120,20 @@ pub fn build_ui(app: &Application) {
     list_box.set_margin_bottom(12);
     list_box.set_margin_start(12);
     list_box.set_margin_end(12);
-    // Start-aligned so the box reports its natural (summed-rows) height to
-    // the ScrolledWindow instead of being stretched/centered into whatever
-    // height it's handed, which is what let rows compress on a large window.
     list_box.set_valign(Align::Start);
     let list_scroll = ScrolledWindow::builder()
         .vexpand(true)
         .propagate_natural_height(false)
+        // Root cause of rows compressing instead of scrolling, confirmed by
+        // screenshotting a real build: without max-content-height, a
+        // ScrolledWindow tries to grow to fit ALL of its content before
+        // ever committing to scrolling — so on first launch, or on a large/
+        // maximized window, GTK sizes the window (or WM caps it at the
+        // screen edge) to fit as much as it can, and whatever doesn't fit
+        // gets silently clipped rather than scrolled. Capping how tall the
+        // list is allowed to grow forces it to commit to scrolling once
+        // content exceeds this height, regardless of window/screen size.
+        .max_content_height(600)
         .child(&list_box)
         .build();
     stack.add_named(&list_scroll, Some("list"));
@@ -138,6 +154,7 @@ pub fn build_ui(app: &Application) {
 
     let refresh_list: Rc<dyn Fn()> = {
         let list_box = list_box.clone();
+        let list_scroll = list_scroll.clone();
         let stack = stack.clone();
         let window = window.clone();
         let toast_overlay = toast_overlay.clone();
@@ -157,7 +174,7 @@ pub fn build_ui(app: &Application) {
             stack.set_visible_child_name("list");
 
             for trainer in trainers {
-                let row = ActionRow::builder().title(trainer.display_name()).build();
+                let row = ActionRow::builder().title(esc(trainer.display_name())).build();
                 if let Some(appid) = trainer.appid {
                     row.set_tooltip_text(Some(&format!("Steam AppID {appid}")));
                 }
@@ -220,6 +237,17 @@ pub fn build_ui(app: &Application) {
 
                 list_box.append(&row);
             }
+
+            // Force GTK to remeasure the list against its new row count
+            // rather than potentially reusing a stale natural-height
+            // measurement from before this rebuild — the append() calls
+            // above should already invalidate this, but explicitly
+            // queuing it here is cheap insurance against exactly the
+            // "rows compress instead of scrolling" symptom this app has
+            // shown outside of an interactive window resize (which does
+            // force a fresh measure/allocate pass on its own).
+            list_box.queue_resize();
+            list_scroll.queue_resize();
         })
     };
     *self_slot.borrow_mut() = Some(refresh_list.clone());
@@ -474,7 +502,7 @@ fn prompt_appid_for_queue(
     };
 
     let dialog = AdwDialog::builder()
-        .title(format!("Add Steam AppID for \u{201c}{filename}\u{201d}?"))
+        .title(format!("Add Steam AppID for \u{201c}{}\u{201d}?", esc(&filename)))
         .content_width(420)
         .content_height(480)
         .build();
@@ -557,7 +585,7 @@ fn prompt_appid_for_queue(
         let confirm = confirm.clone();
         move |result: gamedata::SearchResult| -> ActionRow {
             let row = ActionRow::builder()
-                .title(result.name.clone())
+                .title(esc(&result.name))
                 .subtitle(format!("AppID {}", result.appid))
                 .activatable(true)
                 .build();
@@ -1098,7 +1126,7 @@ fn show_troubleshoot(window: &ApplicationWindow, toast_overlay: &ToastOverlay) {
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_default();
-                let row = ActionRow::builder().title(&name).build();
+                let row = ActionRow::builder().title(esc(&name)).build();
 
                 let clear_btn = Button::builder()
                     .label("Clear")
