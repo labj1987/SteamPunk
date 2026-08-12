@@ -54,6 +54,13 @@ pub fn build_ui(app: &Application) {
 
     let toast_overlay = ToastOverlay::new();
 
+    // Tracked pgid per running trainer (keyed by trainer file path), for the
+    // lifetime of the app session — not just at launch time. See
+    // launcher::launch_trainer's doc comment for why the process group,
+    // not a single pid, is what's tracked.
+    let running: Rc<RefCell<std::collections::HashMap<std::path::PathBuf, u32>>> =
+        Rc::new(RefCell::new(std::collections::HashMap::new()));
+
     // ── Header ───────────────────────────────────────────────────────────────
     let header = HeaderBar::new();
 
@@ -124,6 +131,7 @@ pub fn build_ui(app: &Application) {
         let window = window.clone();
         let toast_overlay = toast_overlay.clone();
         let self_slot = self_slot.clone();
+        let running = running.clone();
 
         Rc::new(move || {
             while let Some(c) = list_box.first_child() {
@@ -157,13 +165,31 @@ pub fn build_ui(app: &Application) {
                     row.add_prefix(&picture);
                 }
 
-                let launch_btn = Button::builder()
-                    .label("Launch")
-                    .valign(Align::Center)
-                    .build();
-                launch_btn.add_css_class("suggested-action");
-                wire_launch_button(&launch_btn, trainer.clone(), window.clone(), toast_overlay.clone());
-                row.add_suffix(&launch_btn);
+                let running_pgid = running.borrow().get(&trainer.path).copied();
+
+                if let Some(pgid) = running_pgid {
+                    let running_badge = Label::new(Some("Running"));
+                    running_badge.add_css_class("success");
+                    running_badge.add_css_class("caption");
+                    running_badge.set_valign(Align::Center);
+                    row.add_suffix(&running_badge);
+
+                    let stop_btn = Button::builder()
+                        .label("Stop")
+                        .valign(Align::Center)
+                        .build();
+                    stop_btn.add_css_class("destructive-action");
+                    wire_stop_button(&stop_btn, trainer.path.clone(), pgid, running.clone(), self_slot.clone(), toast_overlay.clone());
+                    row.add_suffix(&stop_btn);
+                } else {
+                    let launch_btn = Button::builder()
+                        .label("Launch")
+                        .valign(Align::Center)
+                        .build();
+                    launch_btn.add_css_class("suggested-action");
+                    wire_launch_button(&launch_btn, trainer.clone(), window.clone(), toast_overlay.clone(), running.clone(), self_slot.clone());
+                    row.add_suffix(&launch_btn);
+                }
 
                 let remove_btn = Button::builder()
                     .icon_name("user-trash-symbolic")
@@ -194,6 +220,36 @@ pub fn build_ui(app: &Application) {
     *self_slot.borrow_mut() = Some(refresh_list.clone());
 
     refresh_list();
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  Running-trainer poll — non-blocking try_wait() on a single pid isn't
+    //  enough (see launcher::process_group_alive's doc comment), so this
+    //  periodically re-checks each tracked pgid instead. Runs for the app's
+    //  session lifetime; only touches the list when something actually
+    //  changed, to avoid rebuilding rows every tick for nothing.
+    // ─────────────────────────────────────────────────────────────────────────
+    {
+        let running = running.clone();
+        let refresh_list = refresh_list.clone();
+        glib::timeout_add_local(std::time::Duration::from_millis(1000), move || {
+            let exited: Vec<std::path::PathBuf> = running
+                .borrow()
+                .iter()
+                .filter(|(_, &pgid)| !launcher::process_group_alive(pgid))
+                .map(|(path, _)| path.clone())
+                .collect();
+            if !exited.is_empty() {
+                let mut r = running.borrow_mut();
+                for path in &exited {
+                    applog::log(&format!("UI: trainer at {} exited on its own", path.display()));
+                    r.remove(path);
+                }
+                drop(r);
+                refresh_list();
+            }
+            glib::ControlFlow::Continue
+        });
+    }
 
     // ─────────────────────────────────────────────────────────────────────────
     //  Import — file picker
@@ -736,16 +792,23 @@ fn show_game_picker(
     dialog.present(Some(window));
 }
 
+type RunningMap = Rc<RefCell<std::collections::HashMap<std::path::PathBuf, u32>>>;
+type RefreshSlot = Rc<RefCell<Option<Rc<dyn Fn()>>>>;
+
 fn wire_launch_button(
     btn: &Button,
     trainer: Trainer,
     window: ApplicationWindow,
     toast_overlay: ToastOverlay,
+    running: RunningMap,
+    refresh_slot: RefreshSlot,
 ) {
     btn.connect_clicked(move |_| {
         let trainer = trainer.clone();
         let window = window.clone();
         let toast_overlay = toast_overlay.clone();
+        let running = running.clone();
+        let refresh_slot = refresh_slot.clone();
 
         let dialog_window = window.clone();
         let dialog_toasts = toast_overlay.clone();
@@ -756,10 +819,10 @@ fn wire_launch_button(
                 let trainer = trainer.clone();
                 let toasts = dialog_toasts.clone();
                 if !launcher::has_usable_dotnet(&target) {
-                    show_dotnet_dialog(&dialog_window, target, trainer, toasts);
+                    show_dotnet_dialog(&dialog_window, target, trainer, toasts, running.clone(), refresh_slot.clone());
                     return;
                 }
-                launch_trainer_now(target, trainer, toasts);
+                launch_trainer_now(target, trainer, toasts, running.clone(), refresh_slot.clone());
             }),
         );
     });
@@ -767,8 +830,17 @@ fn wire_launch_button(
 
 /// Launch a trainer against an already-resolved target, off the main
 /// thread. Shared by the normal launch path and by the post-setup
-/// auto-launch once the one-time .NET install succeeds.
-fn launch_trainer_now(target: LaunchTarget, trainer: Trainer, toast_overlay: ToastOverlay) {
+/// auto-launch once the one-time .NET install succeeds. On success, the
+/// returned pgid is recorded in `running` (see launcher::launch_trainer)
+/// and the list is refreshed so the row picks up the running badge/Stop
+/// button; the periodic poll in build_ui takes over from there.
+fn launch_trainer_now(
+    target: LaunchTarget,
+    trainer: Trainer,
+    toast_overlay: ToastOverlay,
+    running: RunningMap,
+    refresh_slot: RefreshSlot,
+) {
     let trainer_name = trainer.name.clone();
     let trainer_path = trainer.path.clone();
     let toast_overlay2 = toast_overlay.clone();
@@ -784,13 +856,54 @@ fn launch_trainer_now(target: LaunchTarget, trainer: Trainer, toast_overlay: Toa
             .await
         },
         move |launch_result| match launch_result {
-            Ok(Ok(())) => toast_overlay2.add_toast(Toast::new(&format!(
-                "Launched {trainer_name} (AppId {appid})"
-            ))),
+            Ok(Ok(pgid)) => {
+                toast_overlay2.add_toast(Toast::new(&format!(
+                    "Launched {trainer_name} (AppId {appid})"
+                )));
+                running.borrow_mut().insert(trainer.path.clone(), pgid);
+                if let Some(refresh) = refresh_slot.borrow().clone() {
+                    refresh();
+                }
+            }
             Ok(Err(e)) => toast_overlay2.add_toast(Toast::new(&format!("Launch failed: {e}"))),
             Err(e) => toast_overlay2.add_toast(Toast::new(&format!("Task error: {e}"))),
         },
     );
+}
+
+/// Stop a running trainer: SIGTERM/SIGKILL its whole process group off the
+/// main thread (see launcher::stop_trainer), then drop it from `running`
+/// and refresh the list so the row goes back to a Launch button.
+fn wire_stop_button(
+    btn: &Button,
+    trainer_path: std::path::PathBuf,
+    pgid: u32,
+    running: RunningMap,
+    refresh_slot: RefreshSlot,
+    toast_overlay: ToastOverlay,
+) {
+    btn.connect_clicked(move |_| {
+        let trainer_path = trainer_path.clone();
+        let running = running.clone();
+        let refresh_slot = refresh_slot.clone();
+        let toast_overlay = toast_overlay.clone();
+        applog::log(&format!("UI: Stop clicked for pgid {pgid}"));
+
+        spawn_async(
+            async move { tokio::task::spawn_blocking(move || launcher::stop_trainer(pgid)).await },
+            move |result| {
+                if let Err(e) = result {
+                    toast_overlay.add_toast(Toast::new(&format!("Stop task error: {e}")));
+                } else {
+                    toast_overlay.add_toast(Toast::new("Trainer stopped"));
+                }
+                running.borrow_mut().remove(&trainer_path);
+                if let Some(refresh) = refresh_slot.borrow().clone() {
+                    refresh();
+                }
+            },
+        );
+    });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -813,6 +926,8 @@ fn show_dotnet_dialog(
     target: LaunchTarget,
     trainer: Trainer,
     toast_overlay: ToastOverlay,
+    running: RunningMap,
+    refresh_slot: RefreshSlot,
 ) {
     let body = "This game needs a one-time Windows compatibility component before trainers \
 will run. This will ask for your password once, then take a minute or two.";
@@ -860,7 +975,7 @@ will run. This will ask for your password once, then take a minute or two.";
         let Some((target, trainer)) = state.borrow_mut().take() else {
             return;
         };
-        run_automatic_setup(target, trainer, toast_overlay.clone());
+        run_automatic_setup(target, trainer, toast_overlay.clone(), running.clone(), refresh_slot.clone());
     });
 
     dialog.present(Some(window));
@@ -871,7 +986,13 @@ will run. This will ask for your password once, then take a minute or two.";
 /// on success. Errors from either phase surface via a toast with the real
 /// error message; the setup script and install_dotnet48 both also log to
 /// /var/log/steampunk.log.
-fn run_automatic_setup(target: LaunchTarget, trainer: Trainer, toast_overlay: ToastOverlay) {
+fn run_automatic_setup(
+    target: LaunchTarget,
+    trainer: Trainer,
+    toast_overlay: ToastOverlay,
+    running: RunningMap,
+    refresh_slot: RefreshSlot,
+) {
     toast_overlay.add_toast(Toast::new("Setting up .NET — this may take a minute or two…"));
 
     spawn_async(
@@ -914,7 +1035,7 @@ fn run_automatic_setup(target: LaunchTarget, trainer: Trainer, toast_overlay: To
                     return;
                 }
             };
-            launch_trainer_now(target, trainer, toast_overlay);
+            launch_trainer_now(target, trainer, toast_overlay, running, refresh_slot);
         },
     );
 }
