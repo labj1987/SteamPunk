@@ -46,5 +46,5 @@ fn main() {
         ui::build_ui(app);
     });
 
-    std::process::exit(app.run().value());
+    std::process::exit(app.run().get() as i32);
 }

@@ -15,6 +15,10 @@
     </p>
   </description>
   <launchable type="desktop-id">steampunk.desktop</launchable>
+  <url type="homepage">https://github.com/labj1987/SteamPunk</url>
+  <developer id="io.github.labj1987">
+    <name>Alex Brown</name>
+  </developer>
   <provides>
     <binary>steampunk</binary>
   </provides>
@@ -27,4 +31,5 @@
     <release version="0.2.0" date="2026-08-05"/>
     <release version="0.1.0" date="2026-07-17"/>
   </releases>
+  <content_rating type="oars-1.1"/>
 </component>
