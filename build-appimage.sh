@@ -42,19 +42,19 @@ cp "target/release/$APP"                              "$APPDIR/usr/bin/"
 cp scripts/privileged-setup.sh                        "$APPDIR/usr/lib/$APP/"
 chmod 755 "$APPDIR/usr/lib/$APP/privileged-setup.sh"
 cp data/$APP.desktop                                  "$APPDIR/usr/share/applications/"
-cp data/$APP.png                                       "$APPDIR/usr/share/icons/hicolor/256x256/apps/"
+cp data/$APP-256.png                                    "$APPDIR/usr/share/icons/hicolor/256x256/apps/$APP.png"
 cp data/io.github.labj1987.SteamPunk.setup.policy  "$APPDIR/usr/share/polkit-1/actions/"
 cp data/io.github.labj1987.SteamPunk.appdata.xml   "$APPDIR/usr/share/metainfo/"
 
 # Top-level AppImage requirements
 cp data/$APP.desktop "$APPDIR/"
-cp data/$APP.png     "$APPDIR/"
+cp data/$APP-256.png "$APPDIR/$APP.png"
 
 # ── AppRun ────────────────────────────────────────────────────────────
 # On first launch (or after an update) the privileged script and polkit
 # policy must exist at fixed system paths — polkit refuses relative/user
 # paths — so AppRun installs them via pkexec when missing or outdated, then
-# execs the app. Same pattern as MKI's AppRun.
+# execs the app. Same pattern as KernelPop's AppRun.
 cat > "$APPDIR/AppRun" << 'APPRUN'
 #!/usr/bin/env bash
 HERE="$(dirname "$(readlink -f "$0")")"
@@ -106,7 +106,7 @@ echo "==> Done: $OUT"
 ls -lh "$OUT"
 
 # appimagetool's built-in zsync generation silently no-ops on GitHub Actions
-# runners even when zsyncmake is installed and working (see MKI's CLAUDE.md
+# runners even when zsyncmake is installed and working (see KernelPop's CLAUDE.md
 # for the diagnosis) — build the .zsync sidecar directly instead. Non-fatal:
 # the AppImage itself is already valid without it.
 echo "==> Generating .zsync sidecar"
