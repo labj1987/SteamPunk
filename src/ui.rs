@@ -147,12 +147,6 @@ pub fn build_ui(app: &Application) {
 
             for trainer in trainers {
                 let row = ActionRow::builder().title(trainer.display_name()).build();
-                // Only trainers with a resolved game name get the filename
-                // as a subtitle — trainers with no AppID keep exactly
-                // today's single-line display.
-                if trainer.game_name.is_some() {
-                    row.set_subtitle(&trainer.name);
-                }
                 if let Some(appid) = trainer.appid {
                     row.set_tooltip_text(Some(&format!("Steam AppID {appid}")));
                 }

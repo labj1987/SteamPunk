@@ -6,8 +6,9 @@ use std::path::{Path, PathBuf};
 #[derive(Clone, Debug)]
 pub struct Trainer {
     /// File stem (e.g. "CrimsonDesert_1_13") — the display name when no
-    /// AppID is set, and the secondary/subtitle line when one is (see
-    /// `display_name` and ui.rs).
+    /// AppID is set (see `display_name`). Once a resolved game name is
+    /// available it takes over the row entirely; this is no longer shown
+    /// anywhere in that case.
     pub name: String,
     pub path: PathBuf,
     /// Optional per-trainer Steam AppID association, set at import time.
