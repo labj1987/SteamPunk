@@ -4,6 +4,12 @@ GTK4 + libadwaita desktop app for launching Windows game-trainer executables
 (e.g. FLiNG trainers) through Proton against a currently running Steam
 game's wine session, on Linux. (Formerly known as proton-trainer.)
 
+## Screenshot
+
+Trainer list, showing cover art resolved from an associated Steam AppID, and a Stop button on any currently-running trainer:
+
+![Trainer list showing imported games, cover art, and Launch/Stop controls](screenshots/main.png)
+
 ## How it works
 
 The trainer is launched directly on the host — no Steam Linux Runtime
@@ -32,7 +38,7 @@ actual running `wineserver` process rather than trusting `compatdata`'s
 
 1. Start the game, load past any menus.
 2. Drag a trainer `.exe` onto the window (or use the + button) to import it.
-3. Click Launch on the trainer's row.
+3. Click Launch on the trainer's row. A running trainer shows a live badge and a Stop button in its place.
 
 If the game's prefix doesn't have real .NET Framework 4.0 yet (required by
 WPF-based trainers, and never provided by Proton's bundled wine-mono), the
