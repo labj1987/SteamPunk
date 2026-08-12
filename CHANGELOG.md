@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.4.4 — 2026-08-12
+
+- Fixed AppID search returning zero results for any trainer whose guessed
+  search term included "Early Access" (common in filenames for early-
+  access games) — Steam's storesearch API reliably returns 0 hits for a
+  query containing that phrase, confirmed live, even for real, currently-
+  listed games. The term guesser now strips it wherever it appears.
+- Fixed cover art sometimes never getting cached even after successfully
+  picking a game — the guessed CDN image paths (library_600x338.jpg,
+  then flat header.jpg) 404 for a growing number of current games now
+  that Steam has moved most of them to content-hashed asset paths;
+  confirmed live for Monster Hunter Stories 3 (AppID 2852190), which 404s
+  on both. Now falls back to the authoritative `header_image` URL from
+  the same appdetails response already fetched for the name. Also: a
+  trainer with a resolved name but no cover (from before this fix, or any
+  future transient failure) now gets one retry per AppID per app session
+  instead of being stuck with no art forever.
+
 ## 0.4.3 — 2026-08-12
 
 - Actually fixed the trainer list compressing instead of scrolling this

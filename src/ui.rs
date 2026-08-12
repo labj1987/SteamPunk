@@ -70,6 +70,12 @@ pub fn build_ui(app: &Application) {
     let running: Rc<RefCell<std::collections::HashMap<std::path::PathBuf, u32>>> =
         Rc::new(RefCell::new(std::collections::HashMap::new()));
 
+    // AppIDs whose cover-art fetch has already been retried this session —
+    // caps retries at one per AppID per run rather than re-attempting every
+    // refresh_list() if it keeps failing (e.g. genuinely offline).
+    let cover_retry_attempted: Rc<RefCell<std::collections::HashSet<u32>>> =
+        Rc::new(RefCell::new(std::collections::HashSet::new()));
+
     // ── Header ───────────────────────────────────────────────────────────────
     let header = HeaderBar::new();
 
@@ -160,6 +166,7 @@ pub fn build_ui(app: &Application) {
         let toast_overlay = toast_overlay.clone();
         let self_slot = self_slot.clone();
         let running = running.clone();
+        let cover_retry_attempted = cover_retry_attempted.clone();
 
         Rc::new(move || {
             while let Some(c) = list_box.first_child() {
@@ -185,6 +192,29 @@ pub fn build_ui(app: &Application) {
                     picture.set_valign(Align::Center);
                     picture.add_css_class("card");
                     row.add_prefix(&picture);
+                } else if let Some(appid) = trainer.appid {
+                    // Name resolved but cover art didn't — a one-shot
+                    // fetch_and_cache retry earlier only tries once, ever
+                    // (see gamedata::fetch_and_cache), so a transient
+                    // failure (or an AppID whose guessed CDN paths both
+                    // 404 — confirmed live for some current-gen games)
+                    // otherwise leaves it permanently missing. Retry once
+                    // per AppID per session here instead.
+                    if trainer.game_name.is_some()
+                        && cover_retry_attempted.borrow_mut().insert(appid)
+                    {
+                        let refresh = self_slot.clone();
+                        spawn_async(gamedata::fetch_and_cache(appid), move |result| {
+                            if let Err(e) = result {
+                                applog::log(&format!(
+                                    "gamedata: cover retry failed for AppID {appid}: {e}"
+                                ));
+                            }
+                            if let Some(reload) = refresh.borrow().clone() {
+                                reload();
+                            }
+                        });
+                    }
                 }
 
                 let running_pgid = running.borrow().get(&trainer.path).copied();

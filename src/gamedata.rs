@@ -36,9 +36,11 @@ pub fn cached_cover(appid: u32) -> Option<PathBuf> {
 }
 
 /// Fetches the game's name and cover art for `appid` and caches both to
-/// disk. Called once, right after a trainer is associated with an AppID —
-/// `cached_name`/`cached_cover` serve every later read, including across
-/// app restarts, so this never runs again for the same AppID.
+/// disk. Called once per app session, right after a trainer is associated
+/// with an AppID and again on every later launch for any trainer that has
+/// an AppID but no cached cover yet — see the retry note on `fetch_cover`
+/// for why a failed cover fetch shouldn't be treated as permanent the way
+/// `cached_name`/`cached_cover` otherwise let it be.
 ///
 /// The name fetch failing is a real error (nothing to show). The cover
 /// fetch failing is logged but not propagated — a game with a name and no
@@ -52,18 +54,32 @@ pub async fn fetch_and_cache(appid: u32) -> Result<()> {
         .timeout(Duration::from_secs(10))
         .build()?;
 
-    let name = fetch_name(&client, appid).await?;
-    std::fs::write(name_cache_path(appid)?, &name)
+    let details = fetch_appdetails(&client, appid).await?;
+    std::fs::write(name_cache_path(appid)?, &details.name)
         .with_context(|| format!("caching name for AppID {appid}"))?;
 
-    if let Err(e) = fetch_cover(&client, appid).await {
+    if let Err(e) = fetch_cover(&client, appid, details.header_image.as_deref()).await {
         crate::applog::log(&format!("gamedata: cover art fetch failed for AppID {appid}: {e}"));
     }
 
     Ok(())
 }
 
-async fn fetch_name(client: &reqwest::Client, appid: u32) -> Result<String> {
+struct AppDetails {
+    name: String,
+    /// The `header_image` field from Steam's own appdetails response — a
+    /// content-hashed `shared.akamai.steamstatic.com/store_item_assets/...`
+    /// URL Steam's own store page uses, unlike the flat `cdn.akamai.
+    /// steamstatic.com/steam/apps/<id>/header.jpg` guess `fetch_cover` tries
+    /// first. That flat-path guess 404s for a growing number of apps now
+    /// that Steam has moved most current games onto hashed asset paths
+    /// (confirmed live, e.g. AppID 2852190 — Monster Hunter Stories 3 — 404s
+    /// on both the library and flat header guesses), so this is the
+    /// reliable fallback rather than a second unreliable guess.
+    header_image: Option<String>,
+}
+
+async fn fetch_appdetails(client: &reqwest::Client, appid: u32) -> Result<AppDetails> {
     let url = format!("https://store.steampowered.com/api/appdetails?appids={appid}");
     let body: serde_json::Value = client
         .get(&url)
@@ -76,26 +92,41 @@ async fn fetch_name(client: &reqwest::Client, appid: u32) -> Result<String> {
         .await
         .context("parsing appdetails response as JSON")?;
 
-    let name = body
-        .get(appid.to_string())
-        .and_then(|v| v.get("data"))
+    let data = body.get(appid.to_string()).and_then(|v| v.get("data"));
+
+    let name = data
         .and_then(|v| v.get("name"))
         .and_then(|v| v.as_str())
-        .with_context(|| format!("appdetails response for AppID {appid} has no data.name — is the AppID valid?"))?;
-    Ok(name.to_string())
+        .with_context(|| format!("appdetails response for AppID {appid} has no data.name — is the AppID valid?"))?
+        .to_string();
+
+    let header_image = data
+        .and_then(|v| v.get("header_image"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    Ok(AppDetails { name, header_image })
 }
 
-/// Preferred: the horizontal library capsule art, matching Steam's own
-/// library-list aesthetic. Some older AppIDs never got this asset, so a
-/// 404 there falls back to the header image every app page has.
-async fn fetch_cover(client: &reqwest::Client, appid: u32) -> Result<()> {
+/// Tries the guessed horizontal library capsule art first (matching Steam's
+/// own library-list aesthetic, when it exists), then the guessed flat
+/// header path, then — the one guaranteed to work, since it's the exact
+/// URL Steam's own store page serves for this AppID — `header_image` from
+/// the appdetails response already fetched in `fetch_and_cache`.
+async fn fetch_cover(client: &reqwest::Client, appid: u32, header_image: Option<&str>) -> Result<()> {
     let library_url =
         format!("https://cdn.akamai.steamstatic.com/steam/apps/{appid}/library_600x338.jpg");
     let header_url = format!("https://cdn.akamai.steamstatic.com/steam/apps/{appid}/header.jpg");
 
     let bytes = match download_image(client, &library_url).await {
         Ok(b) => b,
-        Err(_) => download_image(client, &header_url).await?,
+        Err(_) => match download_image(client, &header_url).await {
+            Ok(b) => b,
+            Err(e) => match header_image {
+                Some(url) => download_image(client, url).await?,
+                None => return Err(e),
+            },
+        },
     };
     std::fs::write(cover_cache_path(appid)?, bytes)
         .with_context(|| format!("caching cover art for AppID {appid}"))?;
@@ -219,6 +250,14 @@ pub async fn search(term: &str) -> Result<Vec<SearchResult>> {
 /// which is how trainer filenames introduce their cheat count. Everything
 /// before the cut is joined back together as the guessed title; if nothing
 /// matches, the whole stem is returned unchanged.
+///
+/// "Early Access" is then stripped from wherever it appears in that result
+/// (case-insensitive, exact two-word phrase) — trainer filenames for
+/// early-access games often include it ahead of the version token (so it
+/// survives the cut above), but Steam's storesearch API returns zero
+/// results for a query containing it, confirmed live: appending "Early
+/// Access" to an otherwise-matching search term reliably drops the hit
+/// count to 0, even for real, currently-listed games.
 pub fn guess_search_term(filename_stem: &str) -> String {
     let is_version_token = |word: &str| {
         let mut chars = word.chars();
@@ -230,10 +269,30 @@ pub fn guess_search_term(filename_stem: &str) -> String {
         .iter()
         .position(|w| is_version_token(w) || w.eq_ignore_ascii_case("plus"));
 
-    match cut {
+    let base = match cut {
         Some(i) => words[..i].join(" "),
         None => filename_stem.to_string(),
+    };
+
+    strip_early_access(&base)
+}
+
+fn strip_early_access(s: &str) -> String {
+    let words: Vec<&str> = s.split_whitespace().collect();
+    let mut out: Vec<&str> = Vec::with_capacity(words.len());
+    let mut i = 0;
+    while i < words.len() {
+        if i + 1 < words.len()
+            && words[i].eq_ignore_ascii_case("early")
+            && words[i + 1].eq_ignore_ascii_case("access")
+        {
+            i += 2;
+            continue;
+        }
+        out.push(words[i]);
+        i += 1;
     }
+    out.join(" ")
 }
 
 #[cfg(test)]
@@ -268,5 +327,50 @@ mod tests {
     #[test]
     fn no_match_returns_whole_stem() {
         assert_eq!(guess_search_term("Crimson Desert"), "Crimson Desert");
+    }
+
+    #[test]
+    fn strips_early_access() {
+        assert_eq!(
+            guess_search_term("Some Game Early Access v1.0 Plus 20 Trainer"),
+            "Some Game"
+        );
+        // Case-insensitive, and doesn't require it to be right before the
+        // version token.
+        assert_eq!(
+            guess_search_term("Schedule I EARLY ACCESS v0.3.5f8 Plus 10 Trainer"),
+            "Schedule I"
+        );
+    }
+
+    /// Live check against a real AppID (Monster Hunter Stories 3: Twisted
+    /// Reflection) confirmed to 404 on both guessed CDN paths
+    /// (library_600x338.jpg and the flat header.jpg) — verifies the
+    /// appdetails header_image fallback actually rescues cover art for it.
+    #[tokio::test]
+    #[ignore]
+    async fn live_fetch_cover_falls_back_to_appdetails_header_image() {
+        let appid = 2852190;
+        let _ = std::fs::remove_file(super::cover_cache_path(appid).unwrap());
+        super::fetch_and_cache(appid).await.expect("fetch_and_cache");
+        let cover = super::cached_cover(appid);
+        assert!(cover.is_some(), "expected cover art to be cached after fallback");
+        println!("cover cached at {:?}", cover.unwrap());
+    }
+
+    /// Live check that a real, currently-listed game is actually findable
+    /// once "Early Access" is stripped from the guessed term — the bug
+    /// report was that these games returned zero search results.
+    #[tokio::test]
+    #[ignore]
+    async fn live_search_finds_game_after_stripping_early_access() {
+        let term = guess_search_term("Schedule I Early Access v0.3.5f8 Plus 10 Trainer");
+        assert_eq!(term, "Schedule I");
+        let results = super::search(&term).await.expect("search");
+        assert!(!results.is_empty(), "expected at least one result for {term:?}");
+        println!("results for {term:?}: {}", results.len());
+        for r in &results {
+            println!("  {} {}", r.appid, r.name);
+        }
     }
 }
