@@ -90,6 +90,12 @@ pub fn build_ui(app: &Application) {
 
     // ── Stack: empty status page <-> trainer list ───────────────────────────
     let stack = Stack::new();
+    // Without this, Stack's default vhomogeneous=true couples the "list"
+    // page's height request to the "empty" page's (and vice versa) even
+    // though only one is ever visible — on a tall/maximized window that let
+    // the trainer list's rows get squeezed to fit rather than letting the
+    // ScrolledWindow scroll past them.
+    stack.set_vhomogeneous(false);
 
     let status_page = StatusPage::builder()
         .icon_name("input-gaming-symbolic")
@@ -105,8 +111,13 @@ pub fn build_ui(app: &Application) {
     list_box.set_margin_bottom(12);
     list_box.set_margin_start(12);
     list_box.set_margin_end(12);
+    // Start-aligned so the box reports its natural (summed-rows) height to
+    // the ScrolledWindow instead of being stretched/centered into whatever
+    // height it's handed, which is what let rows compress on a large window.
+    list_box.set_valign(Align::Start);
     let list_scroll = ScrolledWindow::builder()
         .vexpand(true)
+        .propagate_natural_height(false)
         .child(&list_box)
         .build();
     stack.add_named(&list_scroll, Some("list"));

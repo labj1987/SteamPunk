@@ -1,6 +1,17 @@
 # Changelog
 
+## 0.4.2 — 2026-08-12
+
+- Fixed trainer rows getting squeezed smaller instead of scrolling as more
+  are added, on a large/maximized window — `Stack`'s default
+  `vhomogeneous` was coupling the trainer list's height request to the
+  empty-state page's, and the list wasn't reporting its true natural
+  height to the surrounding `ScrolledWindow`.
+
 ## 0.4.1 — 2026-08-12
+
+- Trainer rows with a resolved game name now show just that name, without
+  the trainer's own filename underneath.
 
 - Fixes the 0.4.0 release build, which failed in CI: its gtk4/libadwaita
   feature flags (`v4_22`/`v1_9`) required a newer system GTK4/libadwaita
