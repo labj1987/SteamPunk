@@ -1,6 +1,6 @@
 [package]
 name = "steampunk"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2021"
 description = "Launch Windows game trainers through Proton against a running Steam game's wine session"
 authors = ["Alex Brown"]
@@ -10,8 +10,8 @@ name = "steampunk"
 path = "src/main.rs"
 
 [dependencies]
-gtk4 = { version = "0.11", features = ["v4_22"] }
-libadwaita = { version = "0.9", features = ["v1_9"] }
+gtk4 = { version = "0.11", features = ["v4_12"] }
+libadwaita = { version = "0.9", features = ["v1_4", "v1_5"] }
 glib = "0.22"
 gio = "0.22"
 gdk4 = "0.11"

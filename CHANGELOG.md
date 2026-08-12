@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.1 — 2026-08-12
+
+- Fixes the 0.4.0 release build, which failed in CI: its gtk4/libadwaita
+  feature flags (`v4_22`/`v1_9`) required a newer system GTK4/libadwaita
+  than the GitHub Actions runner's `libgtk-4-dev` provides (4.14.5).
+  Dialed the feature flags back to `v4_12`/`v1_4,v1_5` — nothing in this
+  release actually needs the newer APIs.
+
 ## 0.4.0 — 2026-08-12
 
 - Trainer rows now show a live running/stopped badge, and a Stop button
