@@ -399,7 +399,17 @@ fn log_dosdevices(target: &LaunchTarget) {
 /// Launch a trainer against the resolved target, detached: the FLiNG exe
 /// unpacks itself to a TrainerCacheData folder and relaunches, so this
 /// initial process exiting quickly is expected, not a failure.
-pub fn launch_trainer(target: &LaunchTarget, trainer_path: &Path, log_path: &Path) -> Result<()> {
+///
+/// Returns the process group ID to track for the trainer's lifetime (see
+/// `process_group_alive`/`stop_trainer`). `process_group(0)` below makes
+/// this the same number as the spawned pid, but the group — not the single
+/// pid — is what stays valid across a self-relaunch: confirmed against a
+/// real FLiNG trainer (GTA San Andreas Definitive Edition) that the
+/// unpacked `Z:\...\<trainer>.exe` process it relaunches into keeps the
+/// same pgid as this original process, with no explicit setpgid of its
+/// own, and that `kill -TERM -<pgid>` reliably takes down the whole tree
+/// (wrapper + relaunched trainer) in one shot.
+pub fn launch_trainer(target: &LaunchTarget, trainer_path: &Path, log_path: &Path) -> Result<u32> {
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
 
@@ -450,31 +460,122 @@ pub fn launch_trainer(target: &LaunchTarget, trainer_path: &Path, log_path: &Pat
     // normal — logged as information, not an error — but the exit status
     // and anything it wrote to log_path (captured above) are the only
     // window we get into a Proton/wine-level failure our own code can't see.
+    //
+    // This thread also owns reaping: nothing else in the app ever calls
+    // wait()/try_wait() on this Child, so if it stopped polling once the
+    // quick-exit window passed, a process that later exits (on its own, or
+    // via stop_trainer's SIGKILL — confirmed live) would sit as a zombie
+    // for the rest of the app's session, since only this Child handle can
+    // reap it. Keeps polling at a slower cadence indefinitely instead.
     std::thread::spawn(move || {
         let mut child = child;
-        for _ in 0..10 {
-            std::thread::sleep(std::time::Duration::from_millis(200));
+        for i in 0.. {
+            std::thread::sleep(std::time::Duration::from_millis(if i < 10 { 200 } else { 1000 }));
             match child.try_wait() {
                 Ok(Some(status)) => {
-                    crate::applog::log(&format!(
-                        "launch_trainer: pid {pid} exited with {status} \
-                         (a quick exit here is expected — FLiNG trainers unpack \
-                         and relaunch themselves; check the output above/below \
-                         this line and the exit code for signs of an actual error)"
-                    ));
+                    if i < 10 {
+                        crate::applog::log(&format!(
+                            "launch_trainer: pid {pid} exited with {status} \
+                             (a quick exit here is expected — FLiNG trainers unpack \
+                             and relaunch themselves; check the output above/below \
+                             this line and the exit code for signs of an actual error)"
+                        ));
+                    } else {
+                        crate::applog::log(&format!("launch_trainer: pid {pid} exited with {status}"));
+                    }
                     return;
                 }
-                Ok(None) => continue,
+                Ok(None) => {
+                    if i == 9 {
+                        crate::applog::log(&format!("launch_trainer: pid {pid} still running after 2s"));
+                    }
+                    continue;
+                }
                 Err(e) => {
                     crate::applog::log(&format!("launch_trainer: try_wait error for pid {pid}: {e}"));
                     return;
                 }
             }
         }
-        crate::applog::log(&format!("launch_trainer: pid {pid} still running after 2s"));
     });
 
-    Ok(())
+    Ok(pid)
+}
+
+/// True if any *non-zombie* process currently belongs to process group
+/// `pgid`. Used instead of a single `Child::try_wait()` because a trainer
+/// that unpacks and relaunches itself (see `launch_trainer`) can leave the
+/// originally tracked process exited while the relaunched one — never
+/// explicitly moved to its own process group — keeps running under the
+/// same `pgid`.
+///
+/// Zombies are deliberately excluded: a killed process stays visible in
+/// /proc in state `Z` until its parent reaps it (`launch_trainer`'s
+/// watcher thread does this, but not instantly), and a zombie is doing
+/// nothing — for "is the trainer still running" it should read the same as
+/// not present. Confirmed live: without this, a stopped trainer kept
+/// showing as running.
+pub fn process_group_alive(pgid: u32) -> bool {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        if entry.file_name().to_string_lossy().parse::<u32>().is_err() {
+            continue;
+        }
+        let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
+            continue;
+        };
+        // Fields after the "(comm)" can't be split on plain whitespace up
+        // front — comm itself may contain spaces or parens — so split off
+        // everything after the *last* ')' first. What follows is, in
+        // order: state, ppid, pgrp, ... (pgrp is the 3rd field here).
+        let Some((_, after_comm)) = stat.rsplit_once(')') else {
+            continue;
+        };
+        let mut fields = after_comm.split_whitespace();
+        let state = fields.next();
+        if state == Some("Z") {
+            continue;
+        }
+        let pgrp = fields.nth(1).and_then(|s| s.parse::<u32>().ok());
+        if pgrp == Some(pgid) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Stop a trainer launched via `launch_trainer`: SIGTERM the whole process
+/// group first (not just the tracked pid — a lone `kill <pid>` would miss
+/// the relaunched trainer process; see `launch_trainer`'s doc comment),
+/// then SIGKILL after a ~2s grace period if it hasn't exited. Blocks for up
+/// to that grace period — call via `spawn_blocking`, not on the GTK thread.
+pub fn stop_trainer(pgid: u32) {
+    crate::applog::log(&format!("stop_trainer: SIGTERM -{pgid}"));
+    let s = std::process::Command::new("kill").arg("-TERM").arg(format!("-{pgid}")).status();
+    crate::applog::log(&format!("stop_trainer: kill -TERM -{pgid} -> {s:?}"));
+
+    // Same grace window as the post-launch quick-exit check above.
+    for _ in 0..10 {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        if !process_group_alive(pgid) {
+            crate::applog::log(&format!("stop_trainer: pgid {pgid} exited after SIGTERM"));
+            return;
+        }
+    }
+
+    crate::applog::log(&format!("stop_trainer: pgid {pgid} still alive after 2s, sending SIGKILL"));
+    let s = std::process::Command::new("kill").arg("-KILL").arg(format!("-{pgid}")).status();
+    crate::applog::log(&format!("stop_trainer: kill -KILL -{pgid} -> {s:?}"));
+
+    // Deliberately not waiting to confirm SIGKILL took effect: observed live
+    // against a real wine/proton tree that full cleanup can take anywhere
+    // from under a second to several seconds under load, with no reliable
+    // upper bound worth blocking the caller on here. The 1s periodic poll
+    // in ui.rs (see process_group_alive) is what actually converges the
+    // running badge to "gone" once /proc reflects it, however long that
+    // takes — this function's job is just to have sent the signals.
 }
 
 /// The system32/syswow64 files a copied runtime tree depends on: the CLR's own
@@ -733,6 +834,47 @@ mod tests {
     fn release_is_absent_when_only_dotnet40_is_installed() {
         let dotnet40 = SAMPLE.replace("\"Release\"=dword:00080eb1\n", "");
         assert_eq!(parse_dotnet_release(&dotnet40), None);
+    }
+
+    /// Live end-to-end check against a real running game + trainer (GTA San
+    /// Andreas Definitive Edition, AppId 1547000 — must already be running
+    /// with the trainer imported, same as the manual `Testing` steps in the
+    /// running-indicator feature handoff). Not run in CI.
+    #[test]
+    #[ignore]
+    fn live_launch_track_and_stop_a_real_trainer() {
+        let target = resolve_launch_target(1547000).expect("resolve_launch_target(GTA SA)");
+        let trainer_path = PathBuf::from(std::env::var("HOME").unwrap())
+            .join(".local/share/steampunk/trainers")
+            .join("Grand Theft Auto San Andreas The Definitive Edition v1.0-v1.0.8.11827 Plus 49 Trainer.exe");
+        assert!(trainer_path.is_file(), "test trainer not found at {trainer_path:?}");
+        let log_path = PathBuf::from("/tmp/steampunk-live-test.log");
+
+        let pgid = launch_trainer(&target, &trainer_path, &log_path).expect("launch_trainer");
+        println!("launched, pgid={pgid}");
+
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        assert!(
+            process_group_alive(pgid),
+            "expected the trainer's process group to still be alive 3s after launch"
+        );
+        println!("confirmed alive at pgid {pgid}");
+
+        stop_trainer(pgid);
+
+        // stop_trainer itself doesn't block until fully confirmed gone (see
+        // its doc comment) — mirror the UI's own periodic poll here instead
+        // of asserting immediately.
+        let mut gone = false;
+        for _ in 0..50 {
+            if !process_group_alive(pgid) {
+                gone = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        assert!(gone, "pgid {pgid} still alive 10s after stop_trainer");
+        println!("confirmed pgid {pgid} fully stopped");
     }
 }
 
