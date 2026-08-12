@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.4.0 — 2026-08-12
+
+- Trainer rows now show a live running/stopped badge, and a Stop button
+  appears while a trainer is running — SIGTERM, then SIGKILL after a
+  grace period if needed, targeting the trainer's whole process group so
+  it actually stops the running trainer (not just the launcher wrapper).
+- Trainer rows with a resolved game name now show just that name, without
+  the trainer's own filename underneath.
+- New native 16–512px icon set rendered from a new `data/icon.svg` source,
+  replacing the single `steampunk.png`.
+- Added `CLAUDE.md` covering build/release process and architecture.
+- AppStream metadata: added `developer`, `url`, and `content_rating` tags.
+- Dependency bump: gtk4 0.11, libadwaita 0.9, glib/gio 0.22, gdk4 0.11,
+  matching GreenLight/KernelPop's target versions.
+
 ## 0.3.0 — 2026-08-05
 
 - The AppID prompt shown after importing a trainer is now a live search
