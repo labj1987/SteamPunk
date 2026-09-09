@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.5 — 2026-09-09
+
+- Credits Claude Code (Anthropic) in the About dialog's acknowledgements.
+
 ## 0.4.4 — 2026-08-12
 
 - Fixed AppID search returning zero results for any trainer whose guessed
