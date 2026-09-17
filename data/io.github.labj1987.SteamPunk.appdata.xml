@@ -4,7 +4,7 @@
   <name>SteamPunk</name>
   <summary>Launch Windows game trainers through Proton against a running Steam game</summary>
   <metadata_license>MIT</metadata_license>
-  <project_license>MIT</project_license>
+  <project_license>AGPL-3.0-or-later</project_license>
   <description>
     <p>
       Runs a Windows trainer .exe (e.g. a FLiNG trainer) directly against a

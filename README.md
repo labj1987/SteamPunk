@@ -58,3 +58,11 @@ Produces `steampunk-<version>-x86_64.AppImage` (+ `.zsync` sidecar).
 No trainer downloading/update-checking, no SLR/pressure-vessel/umu
 integration, no prefix modification (the app only detects and instructs),
 no per-game trainer database.
+
+## License
+
+AGPL-3.0-or-later. See [LICENSE](LICENSE).
+
+Code at or before commit `0d97e95b89080c5b53efca8880abfd8834d3009a` remains available
+under the MIT License per its original release. From this commit forward,
+AGPL-3.0-or-later.
