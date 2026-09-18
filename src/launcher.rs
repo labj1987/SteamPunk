@@ -598,6 +598,37 @@ fn dotnet_system_files(dir: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Put `src`'s bytes at `dst`, replacing whatever is there — including the symlinks a
+/// Proton prefix uses for its builtin DLLs.
+///
+/// `std::fs::copy` follows symlinks, and a prefix's builtin `mscoree.dll` is a link
+/// into the Proton installation itself, which is read-only. Copying straight onto it
+/// therefore tries to write the native DLL *into Proton's own tree*, fails with
+/// permission denied, and took the entire .NET repair down with it: the framework
+/// trees were cloned, the CLR support libraries never were, and the prefix was left
+/// looking repaired while `mscoree.dll` was still Wine's stub — so `has_usable_dotnet`
+/// stayed false and no .NET trainer could ever load the CLR. Measured on a real prefix
+/// (2026-09-17): `system32/mscoree.dll` was a 109-byte symlink to
+/// `.../Proton-GE Latest/files/lib/wine/x86_64-windows/mscoree.dll`.
+///
+/// Unlinking first is also what makes the result *correct* rather than merely
+/// writable: overriding a builtin means a real file inside the prefix, not a redirect
+/// back to the one being overridden.
+fn install_over_builtin(src: &Path, dst: &Path) -> Result<()> {
+    match std::fs::remove_file(dst) {
+        Ok(()) => {}
+        // Nothing there yet is the normal case for a prefix that never had this DLL.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(e)
+                .with_context(|| format!("clearing {} before copying over it", dst.display()))
+        }
+    }
+    std::fs::copy(src, dst)
+        .with_context(|| format!("copying {} -> {}", src.display(), dst.display()))?;
+    Ok(())
+}
+
 fn copy_dir_all(from: &Path, to: &Path) -> Result<()> {
     std::fs::create_dir_all(to)?;
     for entry in std::fs::read_dir(from)?.flatten() {
@@ -747,17 +778,28 @@ pub fn repair_dotnet_from_sibling_prefix(target: &LaunchTarget) -> Result<bool> 
         if !to.is_dir() {
             continue;
         }
+        let mut copied = 0usize;
         for src in dotnet_system_files(&donor.join(dir)) {
             let Some(name) = src.file_name() else { continue };
             // Overwrite whatever is there under its existing casing — what's
             // present is typically Wine's builtin stub or a 4.0-era copy, and
             // both are exactly the problem being repaired.
             let dst = find_file_ci(&to, &name.to_string_lossy()).unwrap_or_else(|| to.join(name));
-            std::fs::copy(&src, &dst)
-                .with_context(|| format!("copying {} -> {}", src.display(), dst.display()))?;
+            if let Err(e) = install_over_builtin(&src, &dst) {
+                // Logged as well as returned: this failure used to surface only as a
+                // dialog, so the app log showed the framework trees being cloned and
+                // then simply stopped, with nothing to say the repair had aborted.
+                crate::applog::log(&format!(
+                    "repair_dotnet_from_sibling_prefix: FAILED to install {} -> {}: {e:#}",
+                    src.display(),
+                    dst.display()
+                ));
+                return Err(e);
+            }
+            copied += 1;
         }
         crate::applog::log(&format!(
-            "repair_dotnet_from_sibling_prefix: copied CLR support libraries into {dir}"
+            "repair_dotnet_from_sibling_prefix: copied {copied} CLR support libraries into {dir}"
         ));
     }
 
@@ -768,6 +810,91 @@ pub fn repair_dotnet_from_sibling_prefix(target: &LaunchTarget) -> Result<bool> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A scratch directory under the test binary's own temp space, removed on drop.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(tag: &str) -> Self {
+            let p = std::env::temp_dir().join(format!(
+                "steampunk-test-{tag}-{}-{:?}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or_default()
+            ));
+            std::fs::create_dir_all(&p).expect("scratch dir");
+            Self(p)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn installing_over_a_builtin_symlink_replaces_the_link_not_its_target() {
+        // The real failure this reproduces: a Proton prefix ships builtin DLLs as
+        // symlinks into the Proton installation, which is read-only. Copying onto the
+        // link followed it and tried to write into Proton's tree, which failed and
+        // aborted the whole .NET repair -- leaving mscoree.dll as Wine's builtin
+        // forever and every .NET trainer unable to load the CLR.
+        let s = Scratch::new("symlink");
+        let proton = s.0.join("proton");
+        let prefix = s.0.join("prefix");
+        std::fs::create_dir_all(&proton).unwrap();
+        std::fs::create_dir_all(&prefix).unwrap();
+
+        // Stand in for Proton's own builtin, and make it read-only the way a real
+        // installation's files are.
+        let builtin = proton.join("mscoree.dll");
+        std::fs::write(&builtin, b"wine builtin stub").unwrap();
+        let mut perms = std::fs::metadata(&builtin).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&builtin, perms).unwrap();
+
+        let dst = prefix.join("mscoree.dll");
+        std::os::unix::fs::symlink(&builtin, &dst).unwrap();
+
+        let src = s.0.join("native-mscoree.dll");
+        std::fs::write(&src, b"native microsoft mscoree").unwrap();
+
+        install_over_builtin(&src, &dst).expect("installing over a builtin symlink must succeed");
+
+        // The prefix now holds a real file with the native bytes...
+        assert!(!dst.is_symlink(), "destination is still a symlink");
+        assert_eq!(std::fs::read(&dst).unwrap(), b"native microsoft mscoree");
+        // ...and Proton's own copy was left completely alone, which is the part that
+        // used to fail with permission denied.
+        assert_eq!(std::fs::read(&builtin).unwrap(), b"wine builtin stub");
+    }
+
+    #[test]
+    fn installing_over_a_plain_file_still_overwrites_it() {
+        let s = Scratch::new("plain");
+        let dst = s.0.join("mscoree.dll");
+        std::fs::write(&dst, b"old 4.0-era copy").unwrap();
+        let src = s.0.join("new.dll");
+        std::fs::write(&src, b"native").unwrap();
+
+        install_over_builtin(&src, &dst).expect("overwriting a plain file must succeed");
+        assert_eq!(std::fs::read(&dst).unwrap(), b"native");
+    }
+
+    #[test]
+    fn installing_where_nothing_exists_yet_is_not_an_error() {
+        // A prefix that never had the DLL at all is the normal case, not a failure.
+        let s = Scratch::new("absent");
+        let src = s.0.join("new.dll");
+        std::fs::write(&src, b"native").unwrap();
+        let dst = s.0.join("subdir-absent.dll");
+
+        install_over_builtin(&src, &dst).expect("a missing destination must not error");
+        assert_eq!(std::fs::read(&dst).unwrap(), b"native");
+    }
 
     const SAMPLE: &str = concat!(
         "WINE REGISTRY Version 2\n",

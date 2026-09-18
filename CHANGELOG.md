@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.4.6 — 2026-09-17
+
+- Fixed the .NET repair silently aborting partway, which left a prefix that
+  looked repaired but could never run a trainer. A Proton prefix ships its
+  builtin DLLs as symlinks into the Proton installation itself, which is
+  read-only; `std::fs::copy` follows symlinks, so copying the donor prefix's
+  native `mscoree.dll` over the builtin tried to write it *into Proton's own
+  tree*, failed with permission denied, and took the whole repair down with
+  it. The framework trees (`Microsoft.NET`, `assembly`) were cloned first and
+  so appeared to succeed, while the CLR support libraries that follow them
+  were never copied at all — leaving `mscoree.dll` as Wine's 109-byte stub,
+  `has_usable_dotnet` false, and every .NET trainer unable to load the CLR.
+  Confirmed live against Cyberpunk 2077's prefix, whose `system32/mscoree.dll`
+  was a symlink to `Proton-GE Latest/files/lib/wine/x86_64-windows/mscoree.dll`
+  while the donor prefix held the real 444 KB native DLL. The destination is
+  now unlinked before copying, which is also what makes the result correct
+  rather than merely writable: overriding a builtin means a real file in the
+  prefix, not a redirect back to the one being overridden.
+- The repair now logs each failure and the number of CLR support libraries it
+  copied into each directory. The abort above surfaced only as a dialog, so
+  the app log showed the framework trees being cloned and then simply stopped,
+  with nothing to say the repair had failed — a count of zero would have named
+  the problem immediately.
+
 ## 0.4.5 — 2026-09-09
 
 - Credits Claude Code (Anthropic) in the About dialog's acknowledgements.
