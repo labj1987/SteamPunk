@@ -373,4 +373,13 @@ mod tests {
             println!("  {} {}", r.appid, r.name);
         }
     }
+
+    #[test]
+    fn encodes_reserved_characters_and_passes_through_unreserved_ones() {
+        assert_eq!(super::percent_encode("hello"), "hello");
+        assert_eq!(super::percent_encode("hello world"), "hello%20world");
+        assert_eq!(super::percent_encode("100%"), "100%25");
+        assert_eq!(super::percent_encode(""), "");
+        assert_eq!(super::percent_encode("a-b_c.d~e"), "a-b_c.d~e");
+    }
 }
