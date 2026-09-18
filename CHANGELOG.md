@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.7 — 2026-09-17
+
+- Fixed the .NET repair still failing on any prefix it had already tried once.
+  0.4.6 fixed replacing the builtin `mscoree.dll` symlink, but the repair never
+  reached that step: it aborts earlier, while re-cloning the framework trees.
+  `std::fs::copy` preserves the donor's permission bits, so the first clone
+  leaves read-only files behind (28 of them, measured on the real prefix), and
+  `fs::copy` cannot overwrite a read-only file — so the first repair on a fresh
+  prefix appeared to work and every repair after it died partway through. Both
+  the tree copy and the CLR support-library copy now unlink the destination
+  before writing, which covers read-only files and Proton's builtin symlinks
+  with the same rule.
+
 ## 0.4.6 — 2026-09-17
 
 - Fixed the .NET repair silently aborting partway, which left a prefix that

@@ -598,23 +598,27 @@ fn dotnet_system_files(dir: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Put `src`'s bytes at `dst`, replacing whatever is there — including the symlinks a
-/// Proton prefix uses for its builtin DLLs.
+/// Put `src`'s bytes at `dst`, replacing whatever is already there.
 ///
-/// `std::fs::copy` follows symlinks, and a prefix's builtin `mscoree.dll` is a link
-/// into the Proton installation itself, which is read-only. Copying straight onto it
-/// therefore tries to write the native DLL *into Proton's own tree*, fails with
-/// permission denied, and took the entire .NET repair down with it: the framework
-/// trees were cloned, the CLR support libraries never were, and the prefix was left
-/// looking repaired while `mscoree.dll` was still Wine's stub — so `has_usable_dotnet`
-/// stayed false and no .NET trainer could ever load the CLR. Measured on a real prefix
-/// (2026-09-17): `system32/mscoree.dll` was a 109-byte symlink to
-/// `.../Proton-GE Latest/files/lib/wine/x86_64-windows/mscoree.dll`.
+/// `std::fs::copy` opens the destination for writing, which fails in two ways that
+/// both occur throughout a Proton prefix, and either one used to abort the whole .NET
+/// repair through `?`:
 ///
-/// Unlinking first is also what makes the result *correct* rather than merely
-/// writable: overriding a builtin means a real file inside the prefix, not a redirect
-/// back to the one being overridden.
-fn install_over_builtin(src: &Path, dst: &Path) -> Result<()> {
+/// * **Symlinks into the Proton installation.** A prefix ships its builtin DLLs as
+///   links into Proton's own (read-only) tree, and `copy` follows them — so writing
+///   the donor's native `mscoree.dll` tried to write it *into Proton itself* and got
+///   permission denied. Measured 2026-09-17: `system32/mscoree.dll` was a 109-byte
+///   symlink to `.../Proton-GE Latest/files/lib/wine/x86_64-windows/mscoree.dll`.
+/// * **Read-only regular files.** A previous clone copies the donor's permission bits
+///   along with its bytes, so the framework tree it leaves behind contains read-only
+///   files (28 of them, measured on the same prefix). Every later repair then died
+///   partway through re-copying that tree — which is why the first repair on a fresh
+///   prefix appeared to work and every one after it failed.
+///
+/// Unlinking first fixes both, and for the builtin case it is also what makes the
+/// result *correct* rather than merely writable: overriding a builtin means a real
+/// file inside the prefix, not a redirect back to the one being overridden.
+fn replace_file(src: &Path, dst: &Path) -> Result<()> {
     match std::fs::remove_file(dst) {
         Ok(()) => {}
         // Nothing there yet is the normal case for a prefix that never had this DLL.
@@ -637,8 +641,9 @@ fn copy_dir_all(from: &Path, to: &Path) -> Result<()> {
         if src.is_dir() {
             copy_dir_all(&src, &dst)?;
         } else {
-            std::fs::copy(&src, &dst)
-                .with_context(|| format!("copying {} -> {}", src.display(), dst.display()))?;
+            // Replaces rather than writes through: a re-clone hits the read-only files
+            // the previous clone left behind, and `fs::copy` cannot overwrite those.
+            replace_file(&src, &dst)?;
         }
     }
     Ok(())
@@ -785,7 +790,7 @@ pub fn repair_dotnet_from_sibling_prefix(target: &LaunchTarget) -> Result<bool> 
             // present is typically Wine's builtin stub or a 4.0-era copy, and
             // both are exactly the problem being repaired.
             let dst = find_file_ci(&to, &name.to_string_lossy()).unwrap_or_else(|| to.join(name));
-            if let Err(e) = install_over_builtin(&src, &dst) {
+            if let Err(e) = replace_file(&src, &dst) {
                 // Logged as well as returned: this failure used to surface only as a
                 // dialog, so the app log showed the framework trees being cloned and
                 // then simply stopped, with nothing to say the repair had aborted.
@@ -862,7 +867,7 @@ mod tests {
         let src = s.0.join("native-mscoree.dll");
         std::fs::write(&src, b"native microsoft mscoree").unwrap();
 
-        install_over_builtin(&src, &dst).expect("installing over a builtin symlink must succeed");
+        replace_file(&src, &dst).expect("replacing a builtin symlink must succeed");
 
         // The prefix now holds a real file with the native bytes...
         assert!(!dst.is_symlink(), "destination is still a symlink");
@@ -873,6 +878,27 @@ mod tests {
     }
 
     #[test]
+    fn replacing_a_read_only_file_succeeds() {
+        // The failure that actually blocked the repair in practice: a previous clone
+        // copies the donor's permission bits along with its bytes, so the framework
+        // tree it leaves behind contains read-only files. `fs::copy` cannot overwrite
+        // those, so every repair after the first died partway through re-cloning.
+        let s = Scratch::new("readonly");
+        let dst = s.0.join("System.dll");
+        std::fs::write(&dst, b"old").unwrap();
+        let mut perms = std::fs::metadata(&dst).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&dst, perms).unwrap();
+        assert!(std::fs::File::create(&dst).is_err(), "test setup: dst should be unwritable");
+
+        let src = s.0.join("new-System.dll");
+        std::fs::write(&src, b"fresh").unwrap();
+
+        replace_file(&src, &dst).expect("replacing a read-only file must succeed");
+        assert_eq!(std::fs::read(&dst).unwrap(), b"fresh");
+    }
+
+    #[test]
     fn installing_over_a_plain_file_still_overwrites_it() {
         let s = Scratch::new("plain");
         let dst = s.0.join("mscoree.dll");
@@ -880,7 +906,7 @@ mod tests {
         let src = s.0.join("new.dll");
         std::fs::write(&src, b"native").unwrap();
 
-        install_over_builtin(&src, &dst).expect("overwriting a plain file must succeed");
+        replace_file(&src, &dst).expect("overwriting a plain file must succeed");
         assert_eq!(std::fs::read(&dst).unwrap(), b"native");
     }
 
@@ -892,7 +918,7 @@ mod tests {
         std::fs::write(&src, b"native").unwrap();
         let dst = s.0.join("subdir-absent.dll");
 
-        install_over_builtin(&src, &dst).expect("a missing destination must not error");
+        replace_file(&src, &dst).expect("a missing destination must not error");
         assert_eq!(std::fs::read(&dst).unwrap(), b"native");
     }
 
